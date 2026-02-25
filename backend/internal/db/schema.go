@@ -71,6 +71,40 @@ func Init(ctx context.Context, db *sql.DB, defaultAdmin, defaultPassword string,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			note TEXT NOT NULL DEFAULT ''
 		);`,
+		`CREATE TABLE IF NOT EXISTS sync_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			upstream_id INTEGER NOT NULL DEFAULT 0,
+			upstream_name TEXT NOT NULL DEFAULT '',
+			trigger_source TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'info',
+			node_count INTEGER NOT NULL DEFAULT 0,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			detail TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_logs_created_at ON sync_logs(created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS system_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			level TEXT NOT NULL DEFAULT 'info',
+			category TEXT NOT NULL DEFAULT 'system',
+			action TEXT NOT NULL DEFAULT '',
+			detail TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_created_at ON system_logs(created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS auth_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			token_id TEXT NOT NULL UNIQUE,
+			admin_id INTEGER NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			scope TEXT NOT NULL DEFAULT 'full',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			last_used_at DATETIME,
+			expires_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_tokens_admin_id ON auth_tokens(admin_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);`,
 	}
 
 	for _, stmt := range schema {
@@ -90,6 +124,18 @@ func Init(ctx context.Context, db *sql.DB, defaultAdmin, defaultPassword string,
 		return err
 	}
 	if err := ensureSetting(ctx, db, "output_template", "default"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "auto_backup_enabled", "false"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "auto_backup_interval_hours", "24"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "auto_backup_keep", "7"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "auto_backup_last_at", ""); err != nil {
 		return err
 	}
 	return nil

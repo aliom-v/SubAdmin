@@ -18,10 +18,13 @@ type Config struct {
 	AdminUsername         string
 	AdminPassword         string
 	SublinkURL            string
+	SublinkSourceBaseURL  string
+	APITimeout            time.Duration
 	HTTPTimeout           time.Duration
 	DefaultCacheMode      bool
 	DefaultCacheInterval  int
 	SchedulerTickInterval time.Duration
+	SchedulerJobTimeout   time.Duration
 }
 
 func Load() *Config {
@@ -39,10 +42,13 @@ func Load() *Config {
 		AdminUsername:         getenv("ADMIN_USERNAME", "admin"),
 		AdminPassword:         getenv("ADMIN_PASSWORD", "admin123"),
 		SublinkURL:            strings.TrimRight(getenv("SUBLINK_URL", "http://sublink:25500"), "/"),
+		SublinkSourceBaseURL:  strings.TrimRight(getenv("SUBLINK_SOURCE_BASE_URL", "http://api:8080"), "/"),
+		APITimeout:            time.Duration(getint("API_TIMEOUT_SECONDS", 300)) * time.Second,
 		HTTPTimeout:           time.Duration(getint("HTTP_TIMEOUT_SECONDS", 20)) * time.Second,
 		DefaultCacheMode:      getbool("DEFAULT_CACHE_MODE", true),
 		DefaultCacheInterval:  getint("DEFAULT_CACHE_INTERVAL_MINUTES", 10),
 		SchedulerTickInterval: time.Duration(getint("SCHEDULER_TICK_SECONDS", 30)) * time.Second,
+		SchedulerJobTimeout:   time.Duration(getint("SCHEDULER_JOB_TIMEOUT_SECONDS", 300)) * time.Second,
 	}
 }
 

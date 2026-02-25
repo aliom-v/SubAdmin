@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +33,21 @@ type contextKey string
 
 const (
 	contextKeyAdmin contextKey = "admin"
+	defaultLogLimit            = 100
+	maxLogLimit                = 500
+	maxRawContentBytes         = 2 * 1024 * 1024
+	maxRawPreviewNodes         = 30
+	defaultAutoBackupHours     = 24
+	defaultAutoBackupKeep      = 7
+	defaultTokenTTLHours       = 24 * 30
+	sublinkSourceTTL           = 2 * time.Minute
+	maxSublinkSourceBytes      = 8 * 1024 * 1024
 )
+
+type sublinkSourceEntry struct {
+	content   string
+	expiresAt time.Time
+}
 
 type AdminClaims struct {
 	UserID   int    `json:"uid"`
@@ -40,8 +56,10 @@ type AdminClaims struct {
 }
 
 type AdminInfo struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
+	ID        int    `json:"id"`
+	Username  string `json:"username"`
+	TokenID   string `json:"token_id,omitempty"`
+	TokenName string `json:"token_name,omitempty"`
 }
 
 type Upstream struct {
@@ -66,17 +84,21 @@ type ManualNode struct {
 }
 
 type Settings struct {
-	CacheMode     bool   `json:"cache_mode"`
-	CacheInterval int    `json:"cache_interval"`
-	OutputTemplate string `json:"output_template"`
+	CacheMode               bool   `json:"cache_mode"`
+	CacheInterval           int    `json:"cache_interval"`
+	OutputTemplate          string `json:"output_template"`
+	AutoBackupEnabled       bool   `json:"auto_backup_enabled"`
+	AutoBackupIntervalHours int    `json:"auto_backup_interval_hours"`
+	AutoBackupKeep          int    `json:"auto_backup_keep"`
 }
 
 type BackupPayload struct {
-	Admins     []BackupAdmin     `json:"admins"`
-	Upstreams  []BackupUpstream  `json:"upstreams"`
-	ManualNodes []BackupNode     `json:"manual_nodes"`
-	Settings   []BackupSetting   `json:"settings"`
-	Snapshots  []BackupSnapshot  `json:"snapshots"`
+	Admins      []BackupAdmin     `json:"admins"`
+	AuthTokens  []BackupAuthToken `json:"auth_tokens"`
+	Upstreams   []BackupUpstream  `json:"upstreams"`
+	ManualNodes []BackupNode      `json:"manual_nodes"`
+	Settings    []BackupSetting   `json:"settings"`
+	Snapshots   []BackupSnapshot  `json:"snapshots"`
 }
 
 type BackupAdmin struct {
@@ -121,16 +143,85 @@ type BackupSnapshot struct {
 	Note      string    `json:"note"`
 }
 
+type BackupAuthToken struct {
+	ID         int        `json:"id"`
+	TokenID    string     `json:"token_id"`
+	AdminID    int        `json:"admin_id"`
+	Name       string     `json:"name"`
+	Scope      string     `json:"scope"`
+	Enabled    bool       `json:"enabled"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+type SyncLog struct {
+	ID            int       `json:"id"`
+	UpstreamID    int       `json:"upstream_id"`
+	UpstreamName  string    `json:"upstream_name"`
+	TriggerSource string    `json:"trigger_source"`
+	Status        string    `json:"status"`
+	NodeCount     int       `json:"node_count"`
+	DurationMs    int64     `json:"duration_ms"`
+	Detail        string    `json:"detail"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type SystemLog struct {
+	ID        int       `json:"id"`
+	Level     string    `json:"level"`
+	Category  string    `json:"category"`
+	Action    string    `json:"action"`
+	Detail    string    `json:"detail"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type UpstreamRawContent struct {
+	UpstreamID int    `json:"upstream_id"`
+	Name       string `json:"name"`
+	Content    string `json:"content"`
+	NodeCount  int    `json:"node_count"`
+	LastStatus string `json:"last_status"`
+}
+
+type UpstreamRawPreview struct {
+	NodeCount         int      `json:"node_count"`
+	PreviewNodes      []string `json:"preview_nodes"`
+	Truncated         bool     `json:"truncated"`
+	NormalizedContent string   `json:"normalized_content"`
+}
+
+type AuthToken struct {
+	ID         int        `json:"id"`
+	Name       string     `json:"name"`
+	Scope      string     `json:"scope"`
+	Enabled    bool       `json:"enabled"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	IsCurrent  bool       `json:"is_current"`
+}
+
+type SnapshotRecord struct {
+	ID            int       `json:"id"`
+	Kind          string    `json:"kind"`
+	Note          string    `json:"note"`
+	ContentLength int       `json:"content_length"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 type Server struct {
-	cfg          *config.Config
-	db           *sql.DB
-	jwtKey       []byte
-	logger       *log.Logger
-	router       http.Handler
-	sublink      *sublink.Client
-	httpClient   *http.Client
-	cacheMu      sync.Mutex
-	lastCacheRun time.Time
+	cfg             *config.Config
+	db              *sql.DB
+	jwtKey          []byte
+	logger          *log.Logger
+	router          http.Handler
+	sublink         *sublink.Client
+	httpClient      *http.Client
+	cacheMu         sync.Mutex
+	lastCacheRun    time.Time
+	sublinkSourceMu sync.Mutex
+	sublinkSources  map[string]sublinkSourceEntry
 }
 
 func New(cfg *config.Config, db *sql.DB, logger *log.Logger) (*Server, error) {
@@ -147,6 +238,7 @@ func New(cfg *config.Config, db *sql.DB, logger *log.Logger) (*Server, error) {
 		httpClient: &http.Client{
 			Timeout: cfg.HTTPTimeout,
 		},
+		sublinkSources: make(map[string]sublinkSourceEntry),
 	}
 	s.router = s.routes()
 	return s, nil
@@ -157,16 +249,22 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() http.Handler {
+	apiTimeout := s.cfg.APITimeout
+	if apiTimeout <= 0 {
+		apiTimeout = 30 * time.Second
+	}
+
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Timeout(30 * time.Second))
+	r.Use(chimw.Timeout(apiTimeout))
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	r.Get("/internal/subsource/{token}", s.handleSublinkSource)
 	r.Get("/clash", s.handleOutput("clash"))
 	r.Get("/singbox", s.handleOutput("singbox"))
 
@@ -179,12 +277,18 @@ func (s *Server) routes() http.Handler {
 
 			private.Get("/me", s.handleMe)
 			private.Put("/password", s.handleChangePassword)
+			private.Get("/tokens", s.handleListTokens)
+			private.Post("/tokens", s.handleCreateToken)
+			private.Delete("/tokens/{id}", s.handleRevokeToken)
 
 			private.Get("/upstreams", s.handleListUpstreams)
 			private.Post("/upstreams", s.handleCreateUpstream)
 			private.Put("/upstreams/{id}", s.handleUpdateUpstream)
 			private.Delete("/upstreams/{id}", s.handleDeleteUpstream)
 			private.Post("/upstreams/{id}/sync", s.handleSyncUpstream)
+			private.Get("/upstreams/{id}/raw", s.handleGetUpstreamRawContent)
+			private.Post("/upstreams/{id}/raw/preview", s.handlePreviewUpstreamRawContent)
+			private.Put("/upstreams/{id}/raw", s.handleUpdateUpstreamRawContent)
 			private.Post("/sync", s.handleSyncAll)
 
 			private.Get("/nodes", s.handleListNodes)
@@ -196,7 +300,13 @@ func (s *Server) routes() http.Handler {
 			private.Put("/settings", s.handleUpdateSettings)
 
 			private.Get("/backup/export", s.handleExportBackup)
+			private.Get("/backup/sqlite", s.handleExportSQLiteBackup)
 			private.Post("/backup/import", s.handleImportBackup)
+			private.Get("/snapshots", s.handleListSnapshots)
+			private.Post("/snapshots/{id}/rollback", s.handleRollbackSnapshot)
+
+			private.Get("/logs/sync", s.handleListSyncLogs)
+			private.Get("/logs/system", s.handleListSystemLogs)
 		})
 	})
 
@@ -204,6 +314,11 @@ func (s *Server) routes() http.Handler {
 }
 
 func (s *Server) StartScheduler(ctx context.Context) {
+	jobTimeout := s.cfg.SchedulerJobTimeout
+	if jobTimeout <= 0 {
+		jobTimeout = 60 * time.Second
+	}
+
 	ticker := time.NewTicker(s.cfg.SchedulerTickInterval)
 	defer ticker.Stop()
 
@@ -212,7 +327,7 @@ func (s *Server) StartScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tickCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			tickCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 			s.runSchedulerTick(tickCtx)
 			cancel()
 		}
@@ -222,55 +337,58 @@ func (s *Server) StartScheduler(ctx context.Context) {
 func (s *Server) runSchedulerTick(ctx context.Context) {
 	if err := s.syncDueUpstreams(ctx); err != nil {
 		s.logger.Printf("scheduler sync error: %v", err)
+		s.writeSystemLog(ctx, "error", "scheduler", "sync_due_upstreams", err.Error())
 	}
 
 	settings, err := s.getSettings(ctx)
 	if err != nil {
 		s.logger.Printf("scheduler settings error: %v", err)
-		return
-	}
-	if !settings.CacheMode {
-		return
-	}
-
-	if time.Since(s.lastCacheRun) < time.Duration(settings.CacheInterval)*time.Minute {
+		s.writeSystemLog(ctx, "error", "scheduler", "load_settings", err.Error())
 		return
 	}
 
-	if _, err := s.refreshCache(ctx); err != nil {
-		s.logger.Printf("scheduler refresh cache error: %v", err)
-		return
+	if settings.CacheMode && time.Since(s.lastCacheRun) >= time.Duration(settings.CacheInterval)*time.Minute {
+		if _, err := s.refreshCache(ctx); err != nil {
+			s.logger.Printf("scheduler refresh cache error: %v", err)
+			s.writeSystemLog(ctx, "error", "scheduler", "refresh_cache", err.Error())
+		} else {
+			s.writeSystemLog(ctx, "info", "scheduler", "refresh_cache", fmt.Sprintf("cache refreshed, interval=%d", settings.CacheInterval))
+			s.lastCacheRun = time.Now()
+		}
 	}
-	s.lastCacheRun = time.Now()
+
+	if err := s.runAutoBackupIfDue(ctx, settings); err != nil {
+		s.logger.Printf("scheduler auto backup error: %v", err)
+		s.writeSystemLog(ctx, "error", "backup", "auto_backup", err.Error())
+	}
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := bearerToken(r)
-		if token == "" {
-			cookie, err := r.Cookie("subadmin_token")
-			if err == nil {
-				token = cookie.Value
-			}
-		}
+		token := extractTokenFromRequest(r)
 		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing auth token")
 			return
 		}
 
-		claims := &AdminClaims{}
-		parsed, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (any, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, errors.New("unexpected signing method")
-			}
-			return s.jwtKey, nil
-		})
-		if err != nil || !parsed.Valid {
+		claims, err := s.parseAndValidateToken(token)
+		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid auth token")
 			return
 		}
+		tokenName, err := s.validateTokenSession(r.Context(), claims.UserID, claims.ID)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "token revoked or expired")
+			return
+		}
+		_, _ = s.db.ExecContext(r.Context(), `UPDATE auth_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE token_id = ?`, claims.ID)
 
-		ctx := context.WithValue(r.Context(), contextKeyAdmin, &AdminInfo{ID: claims.UserID, Username: claims.Username})
+		ctx := context.WithValue(r.Context(), contextKeyAdmin, &AdminInfo{
+			ID:        claims.UserID,
+			Username:  claims.Username,
+			TokenID:   claims.ID,
+			TokenName: tokenName,
+		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -287,6 +405,57 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(parts[1])
 }
 
+func extractTokenFromRequest(r *http.Request) string {
+	token := bearerToken(r)
+	if token != "" {
+		return token
+	}
+	cookie, err := r.Cookie("subadmin_token")
+	if err == nil {
+		return strings.TrimSpace(cookie.Value)
+	}
+	return ""
+}
+
+func (s *Server) parseAndValidateToken(token string) (*AdminClaims, error) {
+	claims := &AdminClaims{}
+	parsed, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return s.jwtKey, nil
+	})
+	if err != nil || !parsed.Valid {
+		return nil, errors.New("token invalid")
+	}
+	if claims.UserID <= 0 || strings.TrimSpace(claims.ID) == "" {
+		return nil, errors.New("token claims invalid")
+	}
+	return claims, nil
+}
+
+func (s *Server) validateTokenSession(ctx context.Context, adminID int, tokenID string) (string, error) {
+	var name string
+	var enabledInt int
+	var expiresAt time.Time
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT name, enabled, expires_at FROM auth_tokens WHERE token_id = ? AND admin_id = ?`,
+		strings.TrimSpace(tokenID),
+		adminID,
+	).Scan(&name, &enabledInt, &expiresAt)
+	if err != nil {
+		return "", err
+	}
+	if enabledInt != 1 {
+		return "", errors.New("token disabled")
+	}
+	if time.Now().After(expiresAt) {
+		return "", errors.New("token expired")
+	}
+	return name, nil
+}
+
 func adminFromContext(ctx context.Context) (*AdminInfo, bool) {
 	admin, ok := ctx.Value(contextKeyAdmin).(*AdminInfo)
 	return admin, ok
@@ -294,8 +463,10 @@ func adminFromContext(ctx context.Context) (*AdminInfo, bool) {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		TokenName  string `json:"token_name"`
+		TokenHours int    `json:"token_hours"`
 	}
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -320,7 +491,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exp := time.Now().Add(s.cfg.TokenTTL)
+	tokenID, err := generateTokenID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create token id")
+		return
+	}
+	tokenHours := req.TokenHours
+	if tokenHours <= 0 {
+		tokenHours = int(s.cfg.TokenTTL / time.Hour)
+	}
+	if tokenHours <= 0 {
+		tokenHours = defaultTokenTTLHours
+	}
+	exp := time.Now().Add(time.Duration(tokenHours) * time.Hour)
+	tokenName := strings.TrimSpace(req.TokenName)
+	if tokenName == "" {
+		tokenName = "web-login"
+	}
 	claims := AdminClaims{
 		UserID:   id,
 		Username: username,
@@ -328,12 +515,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt: jwt.NewNumericDate(exp),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Subject:   strconv.Itoa(id),
+			ID:        tokenID,
 		},
 	}
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := jwtToken.SignedString(s.jwtKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create token")
+		return
+	}
+	if _, err := s.db.ExecContext(
+		r.Context(),
+		`INSERT INTO auth_tokens(token_id, admin_id, name, scope, enabled, expires_at, created_at, last_used_at) VALUES(?, ?, ?, 'full', 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		tokenID,
+		id,
+		tokenName,
+		exp,
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist token")
 		return
 	}
 
@@ -348,13 +547,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token": tokenString,
 		"admin": map[string]any{
-			"id":       id,
-			"username": username,
+			"id":         id,
+			"username":   username,
+			"token_id":   tokenID,
+			"token_name": tokenName,
 		},
 	})
 }
 
-func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token := extractTokenFromRequest(r)
+	if token != "" {
+		if claims, err := s.parseAndValidateToken(token); err == nil {
+			_, _ = s.db.ExecContext(r.Context(), `UPDATE auth_tokens SET enabled = 0 WHERE token_id = ?`, claims.ID)
+		}
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "subadmin_token",
 		Value:    "",
@@ -415,8 +622,155 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update password")
 		return
 	}
+	_, _ = s.db.ExecContext(r.Context(), `UPDATE auth_tokens SET enabled = 0 WHERE admin_id = ? AND token_id <> ?`, admin.ID, admin.TokenID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "password updated"})
+}
+
+func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	admin, ok := adminFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	rows, err := s.db.QueryContext(
+		r.Context(),
+		`SELECT id, token_id, name, scope, enabled, last_used_at, expires_at, created_at
+		FROM auth_tokens
+		WHERE admin_id = ?
+		ORDER BY id DESC`,
+		admin.ID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query tokens")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]AuthToken, 0)
+	for rows.Next() {
+		var item AuthToken
+		var tokenID string
+		var enabledInt int
+		var lastUsed sql.NullTime
+		if err := rows.Scan(&item.ID, &tokenID, &item.Name, &item.Scope, &enabledInt, &lastUsed, &item.ExpiresAt, &item.CreatedAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to scan tokens")
+			return
+		}
+		item.Enabled = enabledInt == 1
+		if lastUsed.Valid {
+			item.LastUsedAt = &lastUsed.Time
+		}
+		item.IsCurrent = strings.TrimSpace(tokenID) != "" && tokenID == admin.TokenID
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
+	admin, ok := adminFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	type request struct {
+		Name  string `json:"name"`
+		Hours int    `json:"hours"`
+	}
+	var req request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	tokenName := strings.TrimSpace(req.Name)
+	if tokenName == "" {
+		tokenName = "api-token"
+	}
+	tokenHours := req.Hours
+	if tokenHours <= 0 {
+		tokenHours = defaultTokenTTLHours
+	}
+	expiresAt := time.Now().Add(time.Duration(tokenHours) * time.Hour)
+	tokenID, err := generateTokenID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create token id")
+		return
+	}
+
+	claims := AdminClaims{
+		UserID:   admin.ID,
+		Username: admin.Username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Subject:   strconv.Itoa(admin.ID),
+			ID:        tokenID,
+		},
+	}
+	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := jwtToken.SignedString(s.jwtKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to sign token")
+		return
+	}
+	result, err := s.db.ExecContext(
+		r.Context(),
+		`INSERT INTO auth_tokens(token_id, admin_id, name, scope, enabled, expires_at, created_at, last_used_at) VALUES(?, ?, ?, 'full', 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		tokenID,
+		admin.ID,
+		tokenName,
+		expiresAt,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist token")
+		return
+	}
+	insertID, _ := result.LastInsertId()
+	s.writeSystemLog(r.Context(), "info", "auth", "create_token", fmt.Sprintf("admin_id=%d token_id=%s token_name=%s", admin.ID, tokenID, tokenName))
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token": tokenString,
+		"item": AuthToken{
+			ID:        int(insertID),
+			Name:      tokenName,
+			Scope:     "full",
+			Enabled:   true,
+			ExpiresAt: expiresAt,
+			CreatedAt: time.Now(),
+			IsCurrent: false,
+		},
+	})
+}
+
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	admin, ok := adminFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid token id")
+		return
+	}
+
+	var tokenID string
+	var tokenName string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT token_id, name FROM auth_tokens WHERE id = ? AND admin_id = ?`, id, admin.ID).Scan(&tokenID, &tokenName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "token not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to query token")
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), `UPDATE auth_tokens SET enabled = 0 WHERE id = ? AND admin_id = ?`, id, admin.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke token")
+		return
+	}
+	s.writeSystemLog(r.Context(), "info", "auth", "revoke_token", fmt.Sprintf("admin_id=%d token_id=%s token_name=%s", admin.ID, tokenID, tokenName))
+	writeJSON(w, http.StatusOK, map[string]string{"message": "token revoked"})
 }
 
 func (s *Server) handleListUpstreams(w http.ResponseWriter, r *http.Request) {
@@ -573,27 +927,170 @@ func (s *Server) handleSyncUpstream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid upstream id")
 		return
 	}
-	if err := s.syncUpstream(r.Context(), id); err != nil {
+	if err := s.syncUpstream(r.Context(), id, "manual"); err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("sync failed: %v", err))
 		return
 	}
 	settings, _ := s.getSettings(r.Context())
-	if settings.CacheMode {
+	if settings != nil && settings.CacheMode {
 		_, _ = s.refreshCache(r.Context())
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "synced"})
 }
 
 func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
-	if err := s.syncAllUpstreams(r.Context()); err != nil {
+	if err := s.syncAllUpstreams(r.Context(), "manual"); err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("sync failed: %v", err))
 		return
 	}
 	settings, _ := s.getSettings(r.Context())
-	if settings.CacheMode {
+	if settings != nil && settings.CacheMode {
 		_, _ = s.refreshCache(r.Context())
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "all synced"})
+}
+
+func (s *Server) handleGetUpstreamRawContent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid upstream id")
+		return
+	}
+
+	var payload UpstreamRawContent
+	payload.UpstreamID = id
+	if err := s.db.QueryRowContext(
+		r.Context(),
+		`SELECT name, cached_content, last_status FROM upstreams WHERE id = ?`,
+		id,
+	).Scan(&payload.Name, &payload.Content, &payload.LastStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "upstream not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to query upstream content")
+		return
+	}
+
+	payload.NodeCount = len(splitNodes(payload.Content))
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) handlePreviewUpstreamRawContent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid upstream id")
+		return
+	}
+	var exists int
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(1) FROM upstreams WHERE id = ?`, id).Scan(&exists); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check upstream")
+		return
+	}
+	if exists == 0 {
+		writeError(w, http.StatusNotFound, "upstream not found")
+		return
+	}
+
+	type request struct {
+		Content string `json:"content"`
+	}
+	var req request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	nodes, normalized, err := parseRawSubscriptionContent(req.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	previewNodes := nodes
+	truncated := false
+	if len(previewNodes) > maxRawPreviewNodes {
+		previewNodes = previewNodes[:maxRawPreviewNodes]
+		truncated = true
+	}
+	writeJSON(w, http.StatusOK, UpstreamRawPreview{
+		NodeCount:         len(nodes),
+		PreviewNodes:      previewNodes,
+		Truncated:         truncated,
+		NormalizedContent: normalized,
+	})
+}
+
+func (s *Server) handleUpdateUpstreamRawContent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid upstream id")
+		return
+	}
+
+	type request struct {
+		Content string `json:"content"`
+	}
+	var req request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	nodes, normalized, err := parseRawSubscriptionContent(req.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var name string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT name FROM upstreams WHERE id = ?`, id).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "upstream not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to query upstream")
+		return
+	}
+
+	status := fmt.Sprintf("manual raw import (%d nodes)", len(nodes))
+	result, err := s.db.ExecContext(
+		r.Context(),
+		`UPDATE upstreams SET cached_content = ?, last_sync_at = CURRENT_TIMESTAMP, last_status = ? WHERE id = ?`,
+		normalized,
+		status,
+		id,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update upstream raw content")
+		return
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		writeError(w, http.StatusNotFound, "upstream not found")
+		return
+	}
+
+	s.writeSyncLog(r.Context(), id, name, "manual_raw", "ok", len(nodes), 0, status)
+	s.writeSystemLog(
+		r.Context(),
+		"info",
+		"upstream",
+		"raw_import",
+		fmt.Sprintf("upstream_id=%d upstream_name=%s node_count=%d", id, name, len(nodes)),
+	)
+	settings, _ := s.getSettings(r.Context())
+	if settings != nil && settings.CacheMode {
+		_, _ = s.refreshCache(r.Context())
+	}
+
+	writeJSON(w, http.StatusOK, UpstreamRawContent{
+		UpstreamID: id,
+		Name:       name,
+		Content:    normalized,
+		NodeCount:  len(nodes),
+		LastStatus: status,
+	})
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -752,9 +1249,12 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		CacheMode      *bool  `json:"cache_mode"`
-		CacheInterval  *int   `json:"cache_interval"`
-		OutputTemplate string `json:"output_template"`
+		CacheMode               *bool  `json:"cache_mode"`
+		CacheInterval           *int   `json:"cache_interval"`
+		OutputTemplate          string `json:"output_template"`
+		AutoBackupEnabled       *bool  `json:"auto_backup_enabled"`
+		AutoBackupIntervalHours *int   `json:"auto_backup_interval_hours"`
+		AutoBackupKeep          *int   `json:"auto_backup_keep"`
 	}
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -777,6 +1277,15 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.OutputTemplate) != "" {
 		current.OutputTemplate = strings.TrimSpace(req.OutputTemplate)
 	}
+	if req.AutoBackupEnabled != nil {
+		current.AutoBackupEnabled = *req.AutoBackupEnabled
+	}
+	if req.AutoBackupIntervalHours != nil && *req.AutoBackupIntervalHours > 0 {
+		current.AutoBackupIntervalHours = *req.AutoBackupIntervalHours
+	}
+	if req.AutoBackupKeep != nil && *req.AutoBackupKeep > 0 {
+		current.AutoBackupKeep = *req.AutoBackupKeep
+	}
 
 	if err := s.setSetting(r.Context(), "cache_mode", strconv.FormatBool(current.CacheMode)); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save cache mode")
@@ -790,10 +1299,198 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to save output template")
 		return
 	}
+	if err := s.setSetting(r.Context(), "auto_backup_enabled", strconv.FormatBool(current.AutoBackupEnabled)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save auto backup enabled")
+		return
+	}
+	if err := s.setSetting(r.Context(), "auto_backup_interval_hours", strconv.Itoa(current.AutoBackupIntervalHours)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save auto backup interval")
+		return
+	}
+	if err := s.setSetting(r.Context(), "auto_backup_keep", strconv.Itoa(current.AutoBackupKeep)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save auto backup keep")
+		return
+	}
+	s.writeSystemLog(
+		r.Context(),
+		"info",
+		"settings",
+		"update",
+		fmt.Sprintf(
+			"cache_mode=%t cache_interval=%d output_template=%s auto_backup_enabled=%t auto_backup_interval_hours=%d auto_backup_keep=%d",
+			current.CacheMode,
+			current.CacheInterval,
+			current.OutputTemplate,
+			current.AutoBackupEnabled,
+			current.AutoBackupIntervalHours,
+			current.AutoBackupKeep,
+		),
+	)
 	if current.CacheMode {
 		_, _ = s.refreshCache(r.Context())
 	}
 	writeJSON(w, http.StatusOK, current)
+}
+
+func (s *Server) handleListSyncLogs(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimitQuery(r.URL.Query().Get("limit"))
+	rows, err := s.db.QueryContext(
+		r.Context(),
+		`SELECT id, upstream_id, upstream_name, trigger_source, status, node_count, duration_ms, detail, created_at
+		FROM sync_logs
+		ORDER BY id DESC
+		LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query sync logs")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]SyncLog, 0, limit)
+	for rows.Next() {
+		var item SyncLog
+		if err := rows.Scan(
+			&item.ID,
+			&item.UpstreamID,
+			&item.UpstreamName,
+			&item.TriggerSource,
+			&item.Status,
+			&item.NodeCount,
+			&item.DurationMs,
+			&item.Detail,
+			&item.CreatedAt,
+		); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to scan sync logs")
+			return
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleListSystemLogs(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimitQuery(r.URL.Query().Get("limit"))
+	rows, err := s.db.QueryContext(
+		r.Context(),
+		`SELECT id, level, category, action, detail, created_at
+		FROM system_logs
+		ORDER BY id DESC
+		LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query system logs")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]SystemLog, 0, limit)
+	for rows.Next() {
+		var item SystemLog
+		if err := rows.Scan(
+			&item.ID,
+			&item.Level,
+			&item.Category,
+			&item.Action,
+			&item.Detail,
+			&item.CreatedAt,
+		); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to scan system logs")
+			return
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimitQuery(r.URL.Query().Get("limit"))
+	kind := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("kind")))
+	if kind != "" && kind != "clash" && kind != "singbox" {
+		writeError(w, http.StatusBadRequest, "invalid snapshot kind")
+		return
+	}
+
+	var rows *sql.Rows
+	var err error
+	if kind == "" {
+		rows, err = s.db.QueryContext(
+			r.Context(),
+			`SELECT id, kind, note, length(content), created_at
+			FROM snapshots
+			ORDER BY id DESC
+			LIMIT ?`,
+			limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(
+			r.Context(),
+			`SELECT id, kind, note, length(content), created_at
+			FROM snapshots
+			WHERE kind = ?
+			ORDER BY id DESC
+			LIMIT ?`,
+			kind,
+			limit,
+		)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query snapshots")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]SnapshotRecord, 0, limit)
+	for rows.Next() {
+		var item SnapshotRecord
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Note, &item.ContentLength, &item.CreatedAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to scan snapshots")
+			return
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleRollbackSnapshot(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid snapshot id")
+		return
+	}
+	var kind string
+	var content string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT kind, content FROM snapshots WHERE id = ?`, id).Scan(&kind, &content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "snapshot not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to query snapshot")
+		return
+	}
+	kind = strings.TrimSpace(strings.ToLower(kind))
+	if kind != "clash" && kind != "singbox" {
+		writeError(w, http.StatusBadRequest, "snapshot kind is not rollbackable")
+		return
+	}
+	if err := os.WriteFile(s.cacheFile(kind), []byte(content), 0o644); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to write rollback cache")
+		return
+	}
+	if _, err := s.db.ExecContext(
+		r.Context(),
+		`INSERT INTO snapshots(kind, content, note, created_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP)`,
+		kind,
+		content,
+		fmt.Sprintf("rollback from #%d", id),
+	); err != nil {
+		s.logger.Printf("insert rollback snapshot failed: %v", err)
+	}
+	s.lastCacheRun = time.Now()
+	s.writeSystemLog(r.Context(), "info", "snapshot", "rollback", fmt.Sprintf("snapshot_id=%d kind=%s", id, kind))
+	writeJSON(w, http.StatusOK, map[string]string{"message": "rollback completed"})
 }
 
 func (s *Server) handleOutput(target string) http.HandlerFunc {
@@ -825,12 +1522,108 @@ func (s *Server) handleOutput(target string) http.HandlerFunc {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("collect nodes failed: %v", err))
 			return
 		}
-		content, err := s.sublink.Convert(r.Context(), target, nodes)
+		content, err := s.convertNodes(r.Context(), target, nodes)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("convert failed: %v", err))
 			return
 		}
 		writeOutput(w, target, content)
+	}
+}
+
+func (s *Server) handleSublinkSource(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(chi.URLParam(r, "token"))
+	if token == "" {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+
+	content, ok := s.readSublinkSource(token)
+	if !ok {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString([]byte(content))))
+}
+
+func (s *Server) convertNodes(ctx context.Context, target string, nodes []string) (string, error) {
+	if len(nodes) == 0 {
+		return "", errors.New("no nodes available for conversion")
+	}
+
+	payload := strings.Join(nodes, "\n")
+	if len(payload) > maxSublinkSourceBytes {
+		return "", fmt.Errorf("node payload too large (%d bytes)", len(payload))
+	}
+
+	sourceBase := strings.TrimSpace(s.cfg.SublinkSourceBaseURL)
+	if sourceBase == "" {
+		return "", errors.New("sublink source base url is empty")
+	}
+
+	token, err := s.registerSublinkSource(payload)
+	if err != nil {
+		return "", err
+	}
+	defer s.removeSublinkSource(token)
+
+	sourceURL := strings.TrimRight(sourceBase, "/") + "/internal/subsource/" + token
+	return s.sublink.ConvertFromURL(ctx, target, sourceURL)
+}
+
+func (s *Server) registerSublinkSource(content string) (string, error) {
+	token, err := generateTokenID()
+	if err != nil {
+		return "", fmt.Errorf("generate sublink source token: %w", err)
+	}
+
+	now := time.Now()
+	s.sublinkSourceMu.Lock()
+	s.cleanupExpiredSublinkSourcesLocked(now)
+	s.sublinkSources[token] = sublinkSourceEntry{
+		content:   content,
+		expiresAt: now.Add(sublinkSourceTTL),
+	}
+	s.sublinkSourceMu.Unlock()
+
+	return token, nil
+}
+
+func (s *Server) readSublinkSource(token string) (string, bool) {
+	now := time.Now()
+	s.sublinkSourceMu.Lock()
+	defer s.sublinkSourceMu.Unlock()
+
+	s.cleanupExpiredSublinkSourcesLocked(now)
+	entry, ok := s.sublinkSources[token]
+	if !ok {
+		return "", false
+	}
+	if now.After(entry.expiresAt) {
+		delete(s.sublinkSources, token)
+		return "", false
+	}
+	return entry.content, true
+}
+
+func (s *Server) removeSublinkSource(token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	s.sublinkSourceMu.Lock()
+	delete(s.sublinkSources, token)
+	s.sublinkSourceMu.Unlock()
+}
+
+func (s *Server) cleanupExpiredSublinkSourcesLocked(now time.Time) {
+	for token, entry := range s.sublinkSources {
+		if now.After(entry.expiresAt) {
+			delete(s.sublinkSources, token)
+		}
 	}
 }
 
@@ -845,7 +1638,7 @@ func (s *Server) refreshCache(ctx context.Context) (map[string]string, error) {
 
 	result := make(map[string]string, 2)
 	for _, target := range []string{"clash", "singbox"} {
-		converted, err := s.sublink.Convert(ctx, target, nodes)
+		converted, err := s.convertNodes(ctx, target, nodes)
 		if err != nil {
 			return nil, err
 		}
@@ -906,7 +1699,7 @@ func (s *Server) collectNodesFromStore(ctx context.Context) ([]string, error) {
 func (s *Server) collectNodesRealtime(ctx context.Context) ([]string, error) {
 	nodes := make([]string, 0)
 
-	rows, err := s.db.QueryContext(ctx, `SELECT id, url, enabled FROM upstreams ORDER BY id DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, url, enabled, cached_content, last_status FROM upstreams ORDER BY id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("query upstreams: %w", err)
 	}
@@ -915,15 +1708,22 @@ func (s *Server) collectNodesRealtime(ctx context.Context) ([]string, error) {
 		var id int
 		var url string
 		var enabledInt int
-		if err := rows.Scan(&id, &url, &enabledInt); err != nil {
+		var cachedContent string
+		var lastStatus string
+		if err := rows.Scan(&id, &url, &enabledInt, &cachedContent, &lastStatus); err != nil {
 			return nil, fmt.Errorf("scan upstream: %w", err)
 		}
 		if enabledInt != 1 {
 			continue
 		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(lastStatus)), "manual raw import") {
+			nodes = append(nodes, splitNodes(cachedContent)...)
+			continue
+		}
 		fetched, fetchErr := s.fetchUpstreamNodes(ctx, strings.TrimSpace(url))
 		if fetchErr != nil {
 			s.logger.Printf("realtime fetch upstream %d failed: %v", id, fetchErr)
+			nodes = append(nodes, splitNodes(cachedContent)...)
 			continue
 		}
 		nodes = append(nodes, fetched...)
@@ -956,8 +1756,8 @@ func (s *Server) syncDueUpstreams(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("query due upstreams: %w", err)
 	}
-	defer rows.Close()
 
+	dueIDs := make([]int, 0)
 	now := time.Now()
 	for rows.Next() {
 		var id int
@@ -972,46 +1772,95 @@ func (s *Server) syncDueUpstreams(ctx context.Context) error {
 		if lastSync.Valid && now.Sub(lastSync.Time) < time.Duration(interval)*time.Minute {
 			continue
 		}
-		if err := s.syncUpstream(ctx, id); err != nil {
+		dueIDs = append(dueIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate due upstreams: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close due upstream rows: %w", err)
+	}
+
+	for _, id := range dueIDs {
+		if err := s.syncUpstream(ctx, id, "scheduler"); err != nil {
 			s.logger.Printf("sync upstream %d failed: %v", id, err)
 		}
 	}
 	return nil
 }
 
-func (s *Server) syncAllUpstreams(ctx context.Context) error {
+func (s *Server) syncAllUpstreams(ctx context.Context, triggerSource string) error {
+	start := time.Now()
+	s.writeSystemLog(ctx, "info", "sync", "sync_all_start", fmt.Sprintf("trigger=%s", triggerSource))
+
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM upstreams WHERE enabled = 1`)
 	if err != nil {
 		return fmt.Errorf("query enabled upstreams: %w", err)
 	}
-	defer rows.Close()
 
-	var errs []string
+	ids := make([]int, 0)
 	for rows.Next() {
 		var id int
 		if err := rows.Scan(&id); err != nil {
-			return err
+			_ = rows.Close()
+			return fmt.Errorf("scan enabled upstream id: %w", err)
 		}
-		if err := s.syncUpstream(ctx, id); err != nil {
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate enabled upstreams: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close enabled upstream rows: %w", err)
+	}
+
+	var errs []string
+	okCount := 0
+	for _, id := range ids {
+		if err := s.syncUpstream(ctx, id, triggerSource); err != nil {
 			errs = append(errs, fmt.Sprintf("%d:%v", id, err))
+			continue
 		}
+		okCount++
 	}
 	if len(errs) > 0 {
+		s.writeSystemLog(
+			ctx,
+			"error",
+			"sync",
+			"sync_all_finish",
+			fmt.Sprintf("trigger=%s success=%d failed=%d duration_ms=%d", triggerSource, okCount, len(errs), time.Since(start).Milliseconds()),
+		)
 		return errors.New(strings.Join(errs, "; "))
 	}
+	s.writeSystemLog(
+		ctx,
+		"info",
+		"sync",
+		"sync_all_finish",
+		fmt.Sprintf("trigger=%s success=%d failed=%d duration_ms=%d", triggerSource, okCount, 0, time.Since(start).Milliseconds()),
+	)
 	return nil
 }
 
-func (s *Server) syncUpstream(ctx context.Context, id int) error {
+func (s *Server) syncUpstream(ctx context.Context, id int, triggerSource string) error {
+	start := time.Now()
+
+	var name string
 	var url string
 	var enabledInt int
-	if err := s.db.QueryRowContext(ctx, `SELECT url, enabled FROM upstreams WHERE id = ?`, id).Scan(&url, &enabledInt); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT name, url, enabled FROM upstreams WHERE id = ?`, id).Scan(&name, &url, &enabledInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			s.writeSyncLog(ctx, id, "", triggerSource, "fail", 0, time.Since(start).Milliseconds(), "upstream not found")
 			return fmt.Errorf("upstream %d not found", id)
 		}
+		s.writeSyncLog(ctx, id, "", triggerSource, "fail", 0, time.Since(start).Milliseconds(), fmt.Sprintf("query upstream failed: %v", err))
 		return fmt.Errorf("query upstream %d: %w", id, err)
 	}
 	if enabledInt != 1 {
+		s.writeSyncLog(ctx, id, name, triggerSource, "skipped", 0, time.Since(start).Milliseconds(), "upstream disabled")
 		return nil
 	}
 
@@ -1019,6 +1868,9 @@ func (s *Server) syncUpstream(ctx context.Context, id int) error {
 	if err != nil {
 		status := fmt.Sprintf("sync failed: %v", err)
 		_, _ = s.db.ExecContext(ctx, `UPDATE upstreams SET last_sync_at = CURRENT_TIMESTAMP, last_status = ? WHERE id = ?`, status, id)
+		durationMs := time.Since(start).Milliseconds()
+		s.writeSyncLog(ctx, id, name, triggerSource, "fail", 0, durationMs, err.Error())
+		s.writeSystemLog(ctx, "error", "sync", "sync_upstream", fmt.Sprintf("upstream_id=%d upstream_name=%s trigger=%s duration_ms=%d detail=%s", id, name, triggerSource, durationMs, err.Error()))
 		return err
 	}
 
@@ -1031,8 +1883,14 @@ func (s *Server) syncUpstream(ctx context.Context, id int) error {
 		id,
 	)
 	if err != nil {
-		return fmt.Errorf("update upstream cache: %w", err)
+		durationMs := time.Since(start).Milliseconds()
+		err = fmt.Errorf("update upstream cache: %w", err)
+		s.writeSyncLog(ctx, id, name, triggerSource, "fail", len(nodes), durationMs, err.Error())
+		s.writeSystemLog(ctx, "error", "sync", "sync_upstream", fmt.Sprintf("upstream_id=%d upstream_name=%s trigger=%s duration_ms=%d detail=%s", id, name, triggerSource, durationMs, err.Error()))
+		return err
 	}
+	durationMs := time.Since(start).Milliseconds()
+	s.writeSyncLog(ctx, id, name, triggerSource, "ok", len(nodes), durationMs, status)
 	return nil
 }
 
@@ -1083,6 +1941,23 @@ func parseSubscription(body []byte) []string {
 	return dedupeNodes(splitNodes(raw))
 }
 
+func parseRawSubscriptionContent(content string) ([]string, string, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, "", errors.New("content is empty")
+	}
+	if len(content) > maxRawContentBytes {
+		return nil, "", fmt.Errorf("content too large (max %d bytes)", maxRawContentBytes)
+	}
+
+	nodes := parseSubscription([]byte(content))
+	if len(nodes) == 0 {
+		return nil, "", errors.New("content contains no nodes")
+	}
+	normalized := strings.Join(nodes, "\n")
+	return nodes, normalized, nil
+}
+
 func tryDecodeBase64(raw string) string {
 	clean := strings.ReplaceAll(raw, "\n", "")
 	clean = strings.ReplaceAll(clean, "\r", "")
@@ -1113,9 +1988,27 @@ func splitNodes(text string) []string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if !isNodeURI(line) {
+			continue
+		}
 		out = append(out, line)
 	}
 	return out
+}
+
+func isNodeURI(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(lower, "vmess://") ||
+		strings.HasPrefix(lower, "vless://") ||
+		strings.HasPrefix(lower, "trojan://") ||
+		strings.HasPrefix(lower, "ss://") ||
+		strings.HasPrefix(lower, "ssr://") ||
+		strings.HasPrefix(lower, "hysteria://") ||
+		strings.HasPrefix(lower, "hysteria2://") ||
+		strings.HasPrefix(lower, "hy2://") ||
+		strings.HasPrefix(lower, "tuic://") ||
+		strings.HasPrefix(lower, "snell://") ||
+		strings.HasPrefix(lower, "wireguard://")
 }
 
 func dedupeNodes(nodes []string) []string {
@@ -1144,9 +2037,12 @@ func (s *Server) getSettings(ctx context.Context) (*Settings, error) {
 	defer rows.Close()
 
 	settings := &Settings{
-		CacheMode:      s.cfg.DefaultCacheMode,
-		CacheInterval:  s.cfg.DefaultCacheInterval,
-		OutputTemplate: "default",
+		CacheMode:               s.cfg.DefaultCacheMode,
+		CacheInterval:           s.cfg.DefaultCacheInterval,
+		OutputTemplate:          "default",
+		AutoBackupEnabled:       false,
+		AutoBackupIntervalHours: defaultAutoBackupHours,
+		AutoBackupKeep:          defaultAutoBackupKeep,
 	}
 
 	for rows.Next() {
@@ -1170,11 +2066,32 @@ func (s *Server) getSettings(ctx context.Context) (*Settings, error) {
 			if strings.TrimSpace(value) != "" {
 				settings.OutputTemplate = strings.TrimSpace(value)
 			}
+		case "auto_backup_enabled":
+			parsed, err := strconv.ParseBool(value)
+			if err == nil {
+				settings.AutoBackupEnabled = parsed
+			}
+		case "auto_backup_interval_hours":
+			parsed, err := strconv.Atoi(value)
+			if err == nil && parsed > 0 {
+				settings.AutoBackupIntervalHours = parsed
+			}
+		case "auto_backup_keep":
+			parsed, err := strconv.Atoi(value)
+			if err == nil && parsed > 0 {
+				settings.AutoBackupKeep = parsed
+			}
 		}
 	}
 
 	if settings.CacheInterval <= 0 {
 		settings.CacheInterval = 10
+	}
+	if settings.AutoBackupIntervalHours <= 0 {
+		settings.AutoBackupIntervalHours = defaultAutoBackupHours
+	}
+	if settings.AutoBackupKeep <= 0 {
+		settings.AutoBackupKeep = defaultAutoBackupKeep
 	}
 	return settings, nil
 }
@@ -1185,28 +2102,100 @@ func (s *Server) setSetting(ctx context.Context, key, value string) error {
 }
 
 func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
-	payload := BackupPayload{}
-
-	adminsRows, err := s.db.QueryContext(r.Context(), `SELECT id, username, password_hash, created_at FROM admins ORDER BY id`)
+	payload, err := s.collectBackupPayload(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query admins failed")
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("collect backup payload failed: %v", err))
 		return
+	}
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=backup-%d.json", time.Now().Unix()))
+	s.writeSystemLog(
+		r.Context(),
+		"info",
+		"backup",
+		"export",
+		fmt.Sprintf(
+			"admins=%d auth_tokens=%d upstreams=%d manual_nodes=%d settings=%d snapshots=%d",
+			len(payload.Admins),
+			len(payload.AuthTokens),
+			len(payload.Upstreams),
+			len(payload.ManualNodes),
+			len(payload.Settings),
+			len(payload.Snapshots),
+		),
+	)
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) handleExportSQLiteBackup(w http.ResponseWriter, r *http.Request) {
+	tempDir := filepath.Join(s.cfg.CacheDir, "tmp")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "create temp dir failed")
+		return
+	}
+
+	tempFile := filepath.Join(tempDir, fmt.Sprintf("subadmin-sqlite-export-%d.db", time.Now().UnixNano()))
+	if err := s.createSQLiteSnapshot(r.Context(), tempFile); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("export sqlite failed: %v", err))
+		return
+	}
+	defer os.Remove(tempFile)
+
+	data, err := os.ReadFile(tempFile)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read sqlite export failed")
+		return
+	}
+
+	filename := fmt.Sprintf("subadmin-%d.db", time.Now().Unix())
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+
+	s.writeSystemLog(r.Context(), "info", "backup", "export_sqlite", fmt.Sprintf("file=%s size=%d", filename, len(data)))
+}
+
+func (s *Server) collectBackupPayload(ctx context.Context) (*BackupPayload, error) {
+	payload := &BackupPayload{}
+
+	adminsRows, err := s.db.QueryContext(ctx, `SELECT id, username, password_hash, created_at FROM admins ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("query admins failed: %w", err)
 	}
 	for adminsRows.Next() {
 		var row BackupAdmin
 		if err := adminsRows.Scan(&row.ID, &row.Username, &row.PasswordHash, &row.CreatedAt); err != nil {
 			adminsRows.Close()
-			writeError(w, http.StatusInternalServerError, "scan admins failed")
-			return
+			return nil, fmt.Errorf("scan admins failed: %w", err)
 		}
 		payload.Admins = append(payload.Admins, row)
 	}
 	adminsRows.Close()
 
-	upstreamRows, err := s.db.QueryContext(r.Context(), `SELECT id, name, url, enabled, refresh_interval, last_sync_at, last_status, cached_content, created_at FROM upstreams ORDER BY id`)
+	tokenRows, err := s.db.QueryContext(ctx, `SELECT id, token_id, admin_id, name, scope, enabled, last_used_at, expires_at, created_at FROM auth_tokens ORDER BY id`)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query upstreams failed")
-		return
+		return nil, fmt.Errorf("query auth tokens failed: %w", err)
+	}
+	for tokenRows.Next() {
+		var row BackupAuthToken
+		var enabledInt int
+		var lastUsed sql.NullTime
+		if err := tokenRows.Scan(&row.ID, &row.TokenID, &row.AdminID, &row.Name, &row.Scope, &enabledInt, &lastUsed, &row.ExpiresAt, &row.CreatedAt); err != nil {
+			tokenRows.Close()
+			return nil, fmt.Errorf("scan auth tokens failed: %w", err)
+		}
+		row.Enabled = enabledInt == 1
+		if lastUsed.Valid {
+			row.LastUsedAt = &lastUsed.Time
+		}
+		payload.AuthTokens = append(payload.AuthTokens, row)
+	}
+	tokenRows.Close()
+
+	upstreamRows, err := s.db.QueryContext(ctx, `SELECT id, name, url, enabled, refresh_interval, last_sync_at, last_status, cached_content, created_at FROM upstreams ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("query upstreams failed: %w", err)
 	}
 	for upstreamRows.Next() {
 		var row BackupUpstream
@@ -1214,8 +2203,7 @@ func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 		var lastSync sql.NullTime
 		if err := upstreamRows.Scan(&row.ID, &row.Name, &row.URL, &enabledInt, &row.RefreshInterval, &lastSync, &row.LastStatus, &row.CachedContent, &row.CreatedAt); err != nil {
 			upstreamRows.Close()
-			writeError(w, http.StatusInternalServerError, "scan upstreams failed")
-			return
+			return nil, fmt.Errorf("scan upstreams failed: %w", err)
 		}
 		row.Enabled = enabledInt == 1
 		if lastSync.Valid {
@@ -1225,58 +2213,51 @@ func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamRows.Close()
 
-	nodeRows, err := s.db.QueryContext(r.Context(), `SELECT id, name, raw_uri, enabled, group_name, created_at, updated_at FROM manual_nodes ORDER BY id`)
+	nodeRows, err := s.db.QueryContext(ctx, `SELECT id, name, raw_uri, enabled, group_name, created_at, updated_at FROM manual_nodes ORDER BY id`)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query nodes failed")
-		return
+		return nil, fmt.Errorf("query nodes failed: %w", err)
 	}
 	for nodeRows.Next() {
 		var row BackupNode
 		var enabledInt int
 		if err := nodeRows.Scan(&row.ID, &row.Name, &row.RawURI, &enabledInt, &row.GroupName, &row.CreatedAt, &row.UpdatedAt); err != nil {
 			nodeRows.Close()
-			writeError(w, http.StatusInternalServerError, "scan nodes failed")
-			return
+			return nil, fmt.Errorf("scan nodes failed: %w", err)
 		}
 		row.Enabled = enabledInt == 1
 		payload.ManualNodes = append(payload.ManualNodes, row)
 	}
 	nodeRows.Close()
 
-	settingRows, err := s.db.QueryContext(r.Context(), `SELECT key, value FROM settings ORDER BY key`)
+	settingRows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings ORDER BY key`)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query settings failed")
-		return
+		return nil, fmt.Errorf("query settings failed: %w", err)
 	}
 	for settingRows.Next() {
 		var row BackupSetting
 		if err := settingRows.Scan(&row.Key, &row.Value); err != nil {
 			settingRows.Close()
-			writeError(w, http.StatusInternalServerError, "scan settings failed")
-			return
+			return nil, fmt.Errorf("scan settings failed: %w", err)
 		}
 		payload.Settings = append(payload.Settings, row)
 	}
 	settingRows.Close()
 
-	snapshotRows, err := s.db.QueryContext(r.Context(), `SELECT id, kind, content, created_at, note FROM snapshots ORDER BY id`)
+	snapshotRows, err := s.db.QueryContext(ctx, `SELECT id, kind, content, created_at, note FROM snapshots ORDER BY id`)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query snapshots failed")
-		return
+		return nil, fmt.Errorf("query snapshots failed: %w", err)
 	}
 	for snapshotRows.Next() {
 		var row BackupSnapshot
 		if err := snapshotRows.Scan(&row.ID, &row.Kind, &row.Content, &row.CreatedAt, &row.Note); err != nil {
 			snapshotRows.Close()
-			writeError(w, http.StatusInternalServerError, "scan snapshots failed")
-			return
+			return nil, fmt.Errorf("scan snapshots failed: %w", err)
 		}
 		payload.Snapshots = append(payload.Snapshots, row)
 	}
 	snapshotRows.Close()
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=backup-%d.json", time.Now().Unix()))
-	writeJSON(w, http.StatusOK, payload)
+	return payload, nil
 }
 
 func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
@@ -1295,6 +2276,7 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 
 	clearStatements := []string{
 		`DELETE FROM admins`,
+		`DELETE FROM auth_tokens`,
 		`DELETE FROM upstreams`,
 		`DELETE FROM manual_nodes`,
 		`DELETE FROM settings`,
@@ -1317,6 +2299,30 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 			row.CreatedAt,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "restore admins failed")
+			return
+		}
+	}
+
+	for _, row := range payload.AuthTokens {
+		lastUsed := any(nil)
+		if row.LastUsedAt != nil {
+			lastUsed = *row.LastUsedAt
+		}
+		if _, err := tx.ExecContext(
+			r.Context(),
+			`INSERT INTO auth_tokens(id, token_id, admin_id, name, scope, enabled, last_used_at, expires_at, created_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			row.ID,
+			row.TokenID,
+			row.AdminID,
+			row.Name,
+			row.Scope,
+			boolToInt(row.Enabled),
+			lastUsed,
+			row.ExpiresAt,
+			row.CreatedAt,
+		); err != nil {
+			writeError(w, http.StatusInternalServerError, "restore auth tokens failed")
 			return
 		}
 	}
@@ -1384,7 +2390,207 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeSystemLog(
+		r.Context(),
+		"info",
+		"backup",
+		"import",
+		fmt.Sprintf(
+			"admins=%d auth_tokens=%d upstreams=%d manual_nodes=%d settings=%d snapshots=%d",
+			len(payload.Admins),
+			len(payload.AuthTokens),
+			len(payload.Upstreams),
+			len(payload.ManualNodes),
+			len(payload.Settings),
+			len(payload.Snapshots),
+		),
+	)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "backup imported"})
+}
+
+func (s *Server) writeSyncLog(ctx context.Context, upstreamID int, upstreamName, triggerSource, status string, nodeCount int, durationMs int64, detail string) {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO sync_logs(upstream_id, upstream_name, trigger_source, status, node_count, duration_ms, detail, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		upstreamID,
+		strings.TrimSpace(upstreamName),
+		strings.TrimSpace(triggerSource),
+		strings.TrimSpace(status),
+		nodeCount,
+		durationMs,
+		strings.TrimSpace(detail),
+	)
+	if err != nil {
+		s.logger.Printf("write sync log failed: %v", err)
+	}
+}
+
+func (s *Server) writeSystemLog(ctx context.Context, level, category, action, detail string) {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO system_logs(level, category, action, detail, created_at)
+		VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		strings.TrimSpace(level),
+		strings.TrimSpace(category),
+		strings.TrimSpace(action),
+		strings.TrimSpace(detail),
+	)
+	if err != nil {
+		s.logger.Printf("write system log failed: %v", err)
+	}
+}
+
+func (s *Server) runAutoBackupIfDue(ctx context.Context, settings *Settings) error {
+	if settings == nil || !settings.AutoBackupEnabled {
+		return nil
+	}
+
+	lastRaw, err := s.getSettingValue(ctx, "auto_backup_last_at")
+	if err != nil {
+		return fmt.Errorf("read auto backup last time: %w", err)
+	}
+	if strings.TrimSpace(lastRaw) != "" {
+		lastAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(lastRaw))
+		if parseErr == nil {
+			interval := time.Duration(settings.AutoBackupIntervalHours) * time.Hour
+			if interval <= 0 {
+				interval = defaultAutoBackupHours * time.Hour
+			}
+			if time.Since(lastAt) < interval {
+				return nil
+			}
+		}
+	}
+
+	if err := s.performAutoBackup(ctx, settings.AutoBackupKeep); err != nil {
+		return err
+	}
+	return s.setSetting(ctx, "auto_backup_last_at", time.Now().UTC().Format(time.RFC3339))
+}
+
+func (s *Server) performAutoBackup(ctx context.Context, keep int) error {
+	payload, err := s.collectBackupPayload(ctx)
+	if err != nil {
+		return fmt.Errorf("collect backup payload: %w", err)
+	}
+
+	dir := s.backupDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create backup dir: %w", err)
+	}
+
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	jsonPath := filepath.Join(dir, fmt.Sprintf("backup-%s.json", timestamp))
+	jsonBody, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal backup payload: %w", err)
+	}
+	if err := os.WriteFile(jsonPath, jsonBody, 0o600); err != nil {
+		return fmt.Errorf("write backup json: %w", err)
+	}
+
+	sqlitePath := filepath.Join(dir, fmt.Sprintf("backup-%s.db", timestamp))
+	if err := s.createSQLiteSnapshot(ctx, sqlitePath); err != nil {
+		return fmt.Errorf("write backup sqlite: %w", err)
+	}
+
+	if keep <= 0 {
+		keep = defaultAutoBackupKeep
+	}
+	if err := cleanupBackupFiles(dir, ".json", keep); err != nil {
+		s.logger.Printf("cleanup json backups failed: %v", err)
+	}
+	if err := cleanupBackupFiles(dir, ".db", keep); err != nil {
+		s.logger.Printf("cleanup sqlite backups failed: %v", err)
+	}
+
+	s.writeSystemLog(ctx, "info", "backup", "auto_backup", fmt.Sprintf("json=%s sqlite=%s keep=%d", filepath.Base(jsonPath), filepath.Base(sqlitePath), keep))
+	return nil
+}
+
+func (s *Server) createSQLiteSnapshot(ctx context.Context, destPath string) error {
+	destPath = strings.TrimSpace(destPath)
+	if destPath == "" {
+		return errors.New("empty sqlite snapshot destination")
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("create sqlite snapshot dir: %w", err)
+	}
+	if err := os.Remove(destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove old sqlite snapshot: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(FULL)`); err != nil {
+		s.logger.Printf("sqlite checkpoint failed before snapshot: %v", err)
+	}
+	query := fmt.Sprintf("VACUUM INTO '%s'", strings.ReplaceAll(destPath, "'", "''"))
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("vacuum into snapshot: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) getSettingValue(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func (s *Server) backupDir() string {
+	return filepath.Join(s.cfg.DataDir, "backups")
+}
+
+func cleanupBackupFiles(dir, suffix string, keep int) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	type fileMeta struct {
+		path string
+		time time.Time
+	}
+	files := make([]fileMeta, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "backup-") || !strings.HasSuffix(strings.ToLower(name), strings.ToLower(suffix)) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		files = append(files, fileMeta{
+			path: filepath.Join(dir, name),
+			time: info.ModTime(),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].time.After(files[j].time)
+	})
+	if keep < 0 {
+		keep = 0
+	}
+	for idx := keep; idx < len(files); idx++ {
+		_ = os.Remove(files[idx].path)
+	}
+	return nil
+}
+
+func generateTokenID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func (s *Server) readCache(target string) (string, error) {
@@ -1423,6 +2629,20 @@ func parseIDParam(r *http.Request, key string) (int, error) {
 		return 0, errors.New("invalid id")
 	}
 	return id, nil
+}
+
+func parseLimitQuery(value string) int {
+	limit := defaultLogLimit
+	if strings.TrimSpace(value) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > maxLogLimit {
+		return maxLogLimit
+	}
+	return limit
 }
 
 func boolToInt(value bool) int {

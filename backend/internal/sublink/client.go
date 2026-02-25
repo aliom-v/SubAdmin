@@ -1,12 +1,12 @@
 package sublink
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -14,15 +14,6 @@ import (
 type Client struct {
 	baseURL string
 	http    *http.Client
-}
-
-type convertRequest struct {
-	Target  string `json:"target"`
-	Content string `json:"content"`
-}
-
-type convertResponse struct {
-	Data string `json:"data"`
 }
 
 func New(baseURL string, timeout time.Duration) *Client {
@@ -39,25 +30,30 @@ func (c *Client) Convert(ctx context.Context, target string, nodes []string) (st
 		return "", nil
 	}
 	payload := strings.Join(nodes, "\n")
+	return c.ConvertFromURL(ctx, target, toDataURI(payload))
+}
+
+func (c *Client) ConvertFromURL(ctx context.Context, target, sourceURL string) (string, error) {
 	if c.baseURL == "" {
-		return fallbackOutput(target, payload), nil
+		return "", errorsFor("sublink base url is empty")
+	}
+	sourceURL = strings.TrimSpace(sourceURL)
+	if sourceURL == "" {
+		return "", errorsFor("convert source url is empty")
 	}
 
-	body, err := json.Marshal(convertRequest{Target: target, Content: payload})
-	if err != nil {
-		return "", fmt.Errorf("marshal convert request: %w", err)
-	}
-
-	endpoint := c.baseURL + "/convert"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	query := url.Values{}
+	query.Set("target", strings.TrimSpace(target))
+	query.Set("url", sourceURL)
+	endpoint := c.baseURL + "/sub?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("build convert request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fallbackOutput(target, payload), nil
+		return "", fmt.Errorf("request convert endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -66,22 +62,34 @@ func (c *Client) Convert(ctx context.Context, target string, nodes []string) (st
 		return "", fmt.Errorf("read convert response: %w", err)
 	}
 
-	if resp.StatusCode >= 400 {
-		return fallbackOutput(target, payload), nil
-	}
-
-	var parsed convertResponse
-	if err := json.Unmarshal(respData, &parsed); err == nil && strings.TrimSpace(parsed.Data) != "" {
-		return parsed.Data, nil
-	}
-
 	trimmed := strings.TrimSpace(string(respData))
-	if trimmed == "" {
-		return "", nil
+	if resp.StatusCode >= 400 {
+		if trimmed == "" {
+			return "", fmt.Errorf("convert endpoint status %d", resp.StatusCode)
+		}
+		return "", fmt.Errorf("convert endpoint status %d: %s", resp.StatusCode, trimmed)
 	}
+
+	if trimmed == "" {
+		return "", errorsFor("empty convert response")
+	}
+	if isConvertFailure(trimmed) {
+		return "", errorsFor(trimmed)
+	}
+
 	return trimmed, nil
 }
 
-func fallbackOutput(target, content string) string {
-	return fmt.Sprintf("# fallback output for %s\n%s\n", target, content)
+func toDataURI(payload string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(payload))
+	return "data:text/plain;base64," + encoded
+}
+
+func isConvertFailure(content string) bool {
+	lower := strings.ToLower(strings.TrimSpace(content))
+	return strings.Contains(lower, "no nodes were found")
+}
+
+func errorsFor(message string) error {
+	return fmt.Errorf("sublink convert failed: %s", strings.TrimSpace(message))
 }
