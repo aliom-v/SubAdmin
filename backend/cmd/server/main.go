@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 func main() {
 	logger := log.New(os.Stdout, "[subadmin-api] ", log.LstdFlags|log.Lshortfile)
 	cfg := config.Load()
+	warnWeakCredentials(logger, cfg)
 
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
@@ -64,4 +66,46 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Printf("shutdown error: %v", err)
 	}
+}
+
+func warnWeakCredentials(logger *log.Logger, cfg *config.Config) {
+	if isWeakJWTSecret(cfg.JWTSecret) {
+		logger.Printf("WARNING: weak JWT secret detected. Set JWT_SECRET to a random string (>= 16 chars) before production.")
+	}
+	if isWeakAdminPassword(cfg.AdminPassword) {
+		logger.Printf("WARNING: weak admin password detected. Set ADMIN_PASSWORD to a strong password before production.")
+	}
+}
+
+func isWeakJWTSecret(secret string) bool {
+	value := strings.TrimSpace(secret)
+	if value == "" {
+		return true
+	}
+	lower := strings.ToLower(value)
+	if lower == "change-this-in-production" || lower == "changeme" || lower == "secret" {
+		return true
+	}
+	return len(value) < 16
+}
+
+func isWeakAdminPassword(password string) bool {
+	value := strings.TrimSpace(password)
+	if value == "" {
+		return true
+	}
+	lower := strings.ToLower(value)
+	common := map[string]struct{}{
+		"admin123": {},
+		"admin":    {},
+		"password": {},
+		"123456":   {},
+		"12345678": {},
+		"qwerty":   {},
+		"changeme": {},
+	}
+	if _, exists := common[lower]; exists {
+		return true
+	}
+	return len(value) < 10
 }
