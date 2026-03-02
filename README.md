@@ -77,12 +77,12 @@ Phase 4 一键回归：
 - 上游输入应为 URI/base64 节点订阅，不是完整 `yaml/json` 配置文件。
 - 容器内访问主机服务不能用 `127.0.0.1/localhost`，应使用域名或 `host.docker.internal:<port>`。
 
-## 文档
+## 文档导航
 
+- 执行计划（Plan）：`docs/OPTIMIZATION_PLAN.md`
+- 状态摘要（Status）：`docs/STATUS.md`
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
-- 优化实施计划：`docs/OPTIMIZATION_PLAN.md`
-- 项目实现进度：`项目实现进度.md`
 - 前后端源码：`backend/`、`web/`
 
 ## License

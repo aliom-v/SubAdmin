@@ -146,7 +146,7 @@
 任务：
 
 1. 进行端到端回归与故障演练（限流、上游超时、缓存命中）。
-2. 更新 `项目实现进度.md` 的状态矩阵与变更记录。
+2. 更新 `docs/STATUS.md` 的状态矩阵与变更记录。
 3. 形成首轮优化复盘与下一轮计划输入。
 
 ## 7. 详细任务拆解（按优化项）
@@ -393,13 +393,13 @@
 |---|---|---|---|---|---|
 | 2026-03-02 | 新增 `docs/OPTIMIZATION_PLAN.md` | 文档 | 全局 | 已提交 | 首轮优化计划建立 |
 | 2026-03-02 | O1/O2/O3 代码落地 | 代码 | backend/web/.env.example/README | 前端构建待依赖安装，后端编译待 CI | 完成 P0 首批闭环 |
-| 2026-03-02 | O4 代码落地 | 代码 | backend/.env.example/README/项目进度文档 | 后端编译待 CI | 完成并发+重试+隔离闭环 |
+| 2026-03-02 | O4 代码落地 | 代码 | backend/.env.example/README/docs/STATUS.md | 后端编译待 CI | 完成并发+重试+隔离闭环 |
 | 2026-03-02 | O5 代码落地 | 代码 | backend/internal/db/schema.go | `EXPLAIN QUERY PLAN` 显示关键查询由全表扫描切换为索引检索 | 完成索引补齐与计划验证 |
-| 2026-03-02 | O6 代码落地 | 代码 | docker-compose.yml/.env.example/README/项目进度文档 | `docker compose config` 校验通过 | `subconverter` 固定为 digest，更新日期 2026-03-02 |
+| 2026-03-02 | O6 代码落地 | 代码 | docker-compose.yml/.env.example/README/docs/STATUS.md | `docker compose config` 校验通过 | `subconverter` 固定为 digest，更新日期 2026-03-02 |
 | 2026-03-02 | O7 代码落地 | 代码 | backend/internal/server/server.go/backend/internal/server/metrics.go/README/docs | `/metrics` 暴露核心指标，`system_logs.detail` 包含统一结构化字段 | 完成可观测性闭环基础版 |
 | 2026-03-02 | O8 代码落地 | 代码 | .github/workflows/ci.yml | workflow 语法静态检查通过（待远端执行） | 完成 CI 门禁定义与冒烟脚本 |
 | 2026-03-02 | Phase 4 回归脚本 | 代码 | scripts/phase4_acceptance.sh/README | 本地脚本执行通过（含故障演练） | 形成可复用收尾验收入口 |
-| 2026-03-02 | Phase 4 回归执行留痕 | 验收 | scripts/phase4_acceptance.sh/docs/OPTIMIZATION_PLAN.md/项目实现进度.md | `./scripts/phase4_acceptance.sh` 在 Docker 环境全量通过（执行时间：2026-03-02 14:18 +08:00） | 修正系统日志断言为兼容转义 JSON 字符串匹配 |
+| 2026-03-02 | Phase 4 回归执行留痕 | 验收 | scripts/phase4_acceptance.sh/docs/OPTIMIZATION_PLAN.md/docs/STATUS.md | `./scripts/phase4_acceptance.sh` 在 Docker 环境全量通过（执行时间：2026-03-02 14:18 +08:00） | 修正系统日志断言为兼容转义 JSON 字符串匹配 |
 
 ## 13. 里程碑验收点
 
