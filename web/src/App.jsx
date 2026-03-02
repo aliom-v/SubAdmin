@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { apiRequest, getToken, login, logout } from './api'
+import { apiRequest, login, logout } from './api'
 
 const TABS = [
   { id: 'upstreams', label: '上游订阅' },
@@ -56,10 +56,6 @@ function App() {
 
   useEffect(() => {
     const boot = async () => {
-      if (!getToken()) {
-        setBooting(false)
-        return
-      }
       try {
         await fetchMe()
         setAuthed(true)
@@ -506,10 +502,7 @@ function App() {
     try {
       const blob = await fetch('/api/backup/sqlite', {
         method: 'GET',
-        credentials: 'include',
-        headers: {
-          Authorization: `Bearer ${getToken()}`
-        }
+        credentials: 'include'
       }).then(async (response) => {
         if (!response.ok) {
           let message = 'request failed'

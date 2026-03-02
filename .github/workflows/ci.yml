@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Go Test
+        run: go test ./...
+
+      - name: Go Vet
+        run: go vet ./...
+
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+  smoke:
+    name: API Smoke
+    runs-on: ubuntu-latest
+    needs:
+      - backend
+      - frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start Stack
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          docker compose up -d --build api web sublink
+
+      - name: Smoke Check
+        run: |
+          set -euo pipefail
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:18080/healthz >/tmp/healthz.json; then
+              break
+            fi
+            sleep 2
+          done
+          grep -q '"status":"ok"' /tmp/healthz.json
+
+          login_code=$(curl -sS -o /tmp/login.json -w '%{http_code}' \
+            -X POST http://127.0.0.1:18080/api/login \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin123"}')
+          test "${login_code}" = "200"
+          grep -q '"token"' /tmp/login.json
+
+          curl -fsS http://127.0.0.1:18080/metrics >/tmp/metrics.txt
+          grep -q '^subadmin_http_requests_total' /tmp/metrics.txt
+
+          for endpoint in clash singbox; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080/${endpoint}")
+            case "${code}" in
+              200|304|502) ;;
+              *)
+                echo "unexpected status for /${endpoint}: ${code}"
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Shutdown Stack
+        if: always()
+        run: docker compose down -v --remove-orphans

@@ -1,26 +1,7 @@
-const TOKEN_KEY = 'subadmin_token'
-
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || ''
-}
-
-export function setToken(token) {
-  if (!token) {
-    localStorage.removeItem(TOKEN_KEY)
-    return
-  }
-  localStorage.setItem(TOKEN_KEY, token)
-}
-
 export async function apiRequest(path, options = {}) {
-  const token = getToken()
   const headers = {
     'Content-Type': 'application/json',
     ...(options.headers || {})
-  }
-
-  if (token) {
-    headers.Authorization = `Bearer ${token}`
   }
 
   const response = await fetch(path, {
@@ -52,20 +33,12 @@ export async function apiRequest(path, options = {}) {
 }
 
 export async function login(username, password) {
-  const result = await apiRequest('/api/login', {
+  return apiRequest('/api/login', {
     method: 'POST',
     body: JSON.stringify({ username, password })
   })
-  if (result?.token) {
-    setToken(result.token)
-  }
-  return result
 }
 
 export async function logout() {
-  try {
-    await apiRequest('/api/logout', { method: 'POST' })
-  } finally {
-    setToken('')
-  }
+  await apiRequest('/api/logout', { method: 'POST' })
 }

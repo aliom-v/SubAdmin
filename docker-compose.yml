@@ -40,7 +40,7 @@ services:
     restart: unless-stopped
 
   sublink:
-    image: tindy2013/subconverter:latest
+    image: ${SUBLINK_IMAGE:-tindy2013/subconverter@sha256:6db842efdb44bc4c17c9ac05660ed35753e8c195ef105afcba55daceb1ab35bf}
     container_name: subadmin-sublink
     restart: unless-stopped
 

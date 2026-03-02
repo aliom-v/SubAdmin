@@ -29,13 +29,21 @@ docker compose up -d --build api web sublink
 
 - 管理后台：`http://<server-ip>:18081`
 - API 健康检查：`http://<server-ip>:18080/healthz`
+- 监控指标：`http://<server-ip>:18080/metrics`
 - 固定输出：`http://<server-ip>:18081/clash`、`http://<server-ip>:18081/singbox`
 
 快速验收：
 
 ```bash
 curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://127.0.0.1:18080/metrics | head
 docker compose ps
+```
+
+Phase 4 一键回归：
+
+```bash
+./scripts/phase4_acceptance.sh
 ```
 
 ## 部署模式
@@ -49,12 +57,20 @@ docker compose ps
 - Clash 输出：`https://<your-domain>/clash`
 - Sing-box 输出：`https://<your-domain>/singbox`
 
-## 关键配置（同步相关）
+## 关键配置
 
 - `API_TIMEOUT_SECONDS`：API 请求总超时（默认 `300`）
 - `SCHEDULER_JOB_TIMEOUT_SECONDS`：调度任务超时（默认 `300`）
 - `HTTP_TIMEOUT_SECONDS`：单上游拉取超时（默认 `20`）
 - `SUBLINK_SOURCE_BASE_URL`：`sublink` 拉取临时中转源地址（默认 `http://api:8080`）
+- `SUBLINK_IMAGE`：`sublink` 容器镜像（默认固定为 `tindy2013/subconverter@sha256:6db842efdb44bc4c17c9ac05660ed35753e8c195ef105afcba55daceb1ab35bf`）
+- `AUTH_COOKIE_SECURE` / `AUTH_COOKIE_SAMESITE`：认证 Cookie 安全属性（默认 `false` / `lax`）
+- `LOGIN_RATE_MAX_IP` / `LOGIN_RATE_MAX_USERNAME`：登录固定窗口内尝试上限（默认 `30` / `10`）
+- `LOGIN_LOCK_THRESHOLD` / `LOGIN_LOCK_SECONDS`：连续失败锁定阈值与时长（默认 `5` / `300` 秒）
+- `OUTPUT_ETAG_ENABLED` / `OUTPUT_CACHE_CONTROL`：输出接口 ETag/304 与缓存控制（默认 `true` / `no-cache`）
+- `SYNC_MAX_CONCURRENCY`：同步 worker 并发上限（默认 `3`）
+- `SYNC_RETRY_MAX_ATTEMPTS`：单上游最大重试次数（默认 `3`，包含首轮）
+- `SYNC_RETRY_BASE_DELAY_MS` / `SYNC_RETRY_MAX_DELAY_MS`：指数退避基准与上限（默认 `500` / `5000` 毫秒）
 
 ## 使用边界
 
@@ -65,6 +81,7 @@ docker compose ps
 
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
+- 优化实施计划：`docs/OPTIMIZATION_PLAN.md`
 - 项目实现进度：`项目实现进度.md`
 - 前后端源码：`backend/`、`web/`
 

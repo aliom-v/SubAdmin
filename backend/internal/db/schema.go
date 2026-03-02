@@ -51,6 +51,7 @@ func Init(ctx context.Context, db *sql.DB, defaultAdmin, defaultPassword string,
 			cached_content TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_upstreams_enabled ON upstreams(enabled);`,
 		`CREATE TABLE IF NOT EXISTS manual_nodes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -60,6 +61,7 @@ func Init(ctx context.Context, db *sql.DB, defaultAdmin, defaultPassword string,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_manual_nodes_enabled ON manual_nodes(enabled);`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -71,6 +73,7 @@ func Init(ctx context.Context, db *sql.DB, defaultAdmin, defaultPassword string,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			note TEXT NOT NULL DEFAULT ''
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_kind_id ON snapshots(kind, id DESC);`,
 		`CREATE TABLE IF NOT EXISTS sync_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			upstream_id INTEGER NOT NULL DEFAULT 0,

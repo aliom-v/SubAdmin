@@ -1,6 +1,6 @@
 # SubAdmin 排障手册
 
-更新时间：2026-02-25
+更新时间：2026-03-02
 
 ## 1. 快速自检
 
@@ -8,10 +8,13 @@
 # 1) API 健康检查
 curl -fsS http://127.0.0.1:18080/healthz
 
-# 2) 容器状态
+# 2) 指标端点检查
+curl -fsS http://127.0.0.1:18080/metrics | head
+
+# 3) 容器状态
 docker compose ps
 
-# 3) 最近日志
+# 4) 最近日志
 docker compose logs --tail=200 api
 docker compose logs --tail=200 sublink
 ```
@@ -79,6 +82,35 @@ docker compose logs --tail=200 sublink
 2. 检查手动节点是否启用且 URI 合法。
 3. 至少准备一个可识别节点后再触发转换。
 
+### 2.5 `upstream status 429` 或 `upstream status 5xx`
+
+常见原因：
+
+- 上游服务限流（429）或短时故障（5xx）
+- 上游服务端负载过高，响应不稳定
+
+处理建议：
+
+1. 先观察系统日志是否出现 `sync_upstream_retry`，确认系统是否已自动重试。
+2. 若重试后仍失败，可适度调大以下参数：
+   - `SYNC_RETRY_MAX_ATTEMPTS`（默认 3）
+   - `SYNC_RETRY_BASE_DELAY_MS`（默认 500）
+   - `SYNC_RETRY_MAX_DELAY_MS`（默认 5000）
+3. 如上游长期限流，建议降低同步频率或更换上游源。
+
+### 2.6 如何判断“失败隔离”是否生效
+
+现象判定：
+
+- 单个上游失败，但其他上游仍有 `ok` 同步记录，说明失败隔离正常。
+- `POST /api/sync` 返回失败时，如果错误详情包含部分上游 ID，通常表示“部分失败但任务未全局阻断”。
+
+排查步骤：
+
+1. 查看同步日志：确认同一轮次中是否同时存在 `ok` 和 `fail` 记录。
+2. 查看系统日志：关注 `sync_upstream_retry` 与 `sync_upstream` 的 `class` 字段（如 `timeout`、`upstream_5xx`、`upstream_rate_limited`）。
+3. 若全部上游都失败，再回查网络、DNS、上游可达性与超时参数。
+
 ## 3. 网络与容器注意事项
 
 - 容器内 `localhost` 指向容器自身，不是宿主机。
@@ -89,4 +121,5 @@ docker compose logs --tail=200 sublink
 
 1. 后台查看同步日志：`/api/logs/sync`
 2. 后台查看系统日志：`/api/logs/system`
-3. 如果需要备份恢复，请参考：`docs/BACKUP_RESTORE.md`
+3. 如需放大重试容错，检查 `.env`：`SYNC_MAX_CONCURRENCY`、`SYNC_RETRY_MAX_ATTEMPTS`、`SYNC_RETRY_BASE_DELAY_MS`、`SYNC_RETRY_MAX_DELAY_MS`
+4. 如果需要备份恢复，请参考：`docs/BACKUP_RESTORE.md`

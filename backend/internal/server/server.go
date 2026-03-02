@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -11,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,11 +45,52 @@ const (
 	defaultTokenTTLHours       = 24 * 30
 	sublinkSourceTTL           = 2 * time.Minute
 	maxSublinkSourceBytes      = 8 * 1024 * 1024
+	defaultAuthCookieName      = "subadmin_token"
+	defaultLoginRateWindow     = 1 * time.Minute
+	defaultLoginRateMaxIP      = 30
+	defaultLoginRateMaxUser    = 10
+	defaultLoginLockThreshold  = 5
+	defaultLoginLockDuration   = 5 * time.Minute
+	defaultOutputCacheControl  = "no-cache"
+	defaultSyncMaxConcurrency  = 3
+	defaultSyncRetryAttempts   = 3
+	defaultSyncRetryBaseDelay  = 500 * time.Millisecond
+	defaultSyncRetryMaxDelay   = 5 * time.Second
 )
 
 type sublinkSourceEntry struct {
 	content   string
 	expiresAt time.Time
+}
+
+type loginAttemptWindow struct {
+	windowStart time.Time
+	count       int
+}
+
+type syncJobResult struct {
+	id  int
+	err error
+}
+
+type upstreamHTTPStatusError struct {
+	StatusCode int
+}
+
+func (e *upstreamHTTPStatusError) Error() string {
+	return fmt.Sprintf("upstream status %d", e.StatusCode)
+}
+
+type retryableSyncError struct {
+	err error
+}
+
+func (e *retryableSyncError) Error() string {
+	return e.err.Error()
+}
+
+func (e *retryableSyncError) Unwrap() error {
+	return e.err
 }
 
 type AdminClaims struct {
@@ -215,6 +259,7 @@ type Server struct {
 	db              *sql.DB
 	jwtKey          []byte
 	logger          *log.Logger
+	metrics         *serverMetrics
 	router          http.Handler
 	sublink         *sublink.Client
 	httpClient      *http.Client
@@ -222,6 +267,12 @@ type Server struct {
 	lastCacheRun    time.Time
 	sublinkSourceMu sync.Mutex
 	sublinkSources  map[string]sublinkSourceEntry
+	authCookieName  string
+	loginMu         sync.Mutex
+	loginIPWindows  map[string]loginAttemptWindow
+	loginUserWindow map[string]loginAttemptWindow
+	loginFailures   map[string]int
+	loginLocks      map[string]time.Time
 }
 
 func New(cfg *config.Config, db *sql.DB, logger *log.Logger) (*Server, error) {
@@ -229,16 +280,27 @@ func New(cfg *config.Config, db *sql.DB, logger *log.Logger) (*Server, error) {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
+	authCookieName := strings.TrimSpace(cfg.AuthCookieName)
+	if authCookieName == "" {
+		authCookieName = defaultAuthCookieName
+	}
+
 	s := &Server{
-		cfg:     cfg,
-		db:      db,
-		jwtKey:  []byte(cfg.JWTSecret),
-		logger:  logger,
-		sublink: sublink.New(cfg.SublinkURL, cfg.HTTPTimeout),
+		cfg:            cfg,
+		db:             db,
+		jwtKey:         []byte(cfg.JWTSecret),
+		logger:         logger,
+		metrics:        newServerMetrics(),
+		sublink:        sublink.New(cfg.SublinkURL, cfg.HTTPTimeout),
+		authCookieName: authCookieName,
 		httpClient: &http.Client{
 			Timeout: cfg.HTTPTimeout,
 		},
 		sublinkSources: make(map[string]sublinkSourceEntry),
+		loginIPWindows: make(map[string]loginAttemptWindow),
+		loginUserWindow: make(map[string]loginAttemptWindow),
+		loginFailures:  make(map[string]int),
+		loginLocks:     make(map[string]time.Time),
 	}
 	s.router = s.routes()
 	return s, nil
@@ -258,11 +320,13 @@ func (s *Server) routes() http.Handler {
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
+	r.Use(s.metricsMiddleware)
 	r.Use(chimw.Timeout(apiTimeout))
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	r.Get("/metrics", s.handleMetrics)
 
 	r.Get("/internal/subsource/{token}", s.handleSublinkSource)
 	r.Get("/clash", s.handleOutput("clash"))
@@ -311,6 +375,35 @@ func (s *Server) routes() http.Handler {
 	})
 
 	return r
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	if s.metrics == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(s.metrics.renderPrometheus()))
+}
+
+func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.metrics == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		recorder := &statusCaptureWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		route := "unknown"
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			pattern := strings.TrimSpace(rctx.RoutePattern())
+			if pattern != "" {
+				route = pattern
+			}
+		}
+		s.metrics.observeHTTPRequest(r.Method, route, recorder.Status(), time.Since(start))
+	})
 }
 
 func (s *Server) StartScheduler(ctx context.Context) {
@@ -365,7 +458,7 @@ func (s *Server) runSchedulerTick(ctx context.Context) {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := extractTokenFromRequest(r)
+		token := s.extractTokenFromRequest(r)
 		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing auth token")
 			return
@@ -405,12 +498,12 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(parts[1])
 }
 
-func extractTokenFromRequest(r *http.Request) string {
+func (s *Server) extractTokenFromRequest(r *http.Request) string {
 	token := bearerToken(r)
 	if token != "" {
 		return token
 	}
-	cookie, err := r.Cookie("subadmin_token")
+	cookie, err := r.Cookie(s.authCookieName)
 	if err == nil {
 		return strings.TrimSpace(cookie.Value)
 	}
@@ -473,8 +566,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "username and password are required")
+		return
+	}
+	clientIP := requestClientIP(r)
+	if err := s.checkLoginAllowed(clientIP, req.Username); err != nil {
+		writeError(w, http.StatusTooManyRequests, err.Error())
 		return
 	}
 
@@ -483,13 +582,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var passwordHash string
 	query := `SELECT id, username, password_hash FROM admins WHERE username = ?`
 	if err := s.db.QueryRowContext(r.Context(), query, req.Username).Scan(&id, &username, &passwordHash); err != nil {
+		locked, retryAfter := s.recordLoginFailure(clientIP, req.Username)
+		if locked {
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("login temporarily locked, retry after %d seconds", retryAfter))
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		locked, retryAfter := s.recordLoginFailure(clientIP, req.Username)
+		if locked {
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("login temporarily locked, retry after %d seconds", retryAfter))
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+	s.recordLoginSuccess(clientIP, req.Username)
 
 	tokenID, err := generateTokenID()
 	if err != nil {
@@ -536,13 +646,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "subadmin_token",
-		Value:    tokenString,
-		HttpOnly: true,
-		Path:     "/",
-		Expires:  exp,
-	})
+	http.SetCookie(w, s.buildAuthCookie(tokenString, exp, false))
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token": tokenString,
@@ -556,20 +660,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	token := extractTokenFromRequest(r)
+	token := s.extractTokenFromRequest(r)
 	if token != "" {
 		if claims, err := s.parseAndValidateToken(token); err == nil {
 			_, _ = s.db.ExecContext(r.Context(), `UPDATE auth_tokens SET enabled = 0 WHERE token_id = ?`, claims.ID)
 		}
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "subadmin_token",
-		Value:    "",
-		HttpOnly: true,
-		Path:     "/",
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
-	})
+	http.SetCookie(w, s.buildAuthCookie("", time.Unix(0, 0), true))
 	writeJSON(w, http.StatusOK, map[string]string{"message": "ok"})
 }
 
@@ -1504,7 +1601,11 @@ func (s *Server) handleOutput(target string) http.HandlerFunc {
 		if settings.CacheMode {
 			content, err := s.readCache(target)
 			if err == nil && strings.TrimSpace(content) != "" {
-				writeOutput(w, target, content)
+				lastModified := time.Time{}
+				if info, statErr := os.Stat(s.cacheFile(target)); statErr == nil {
+					lastModified = info.ModTime()
+				}
+				s.writeOutput(w, r, target, content, lastModified)
 				return
 			}
 
@@ -1513,7 +1614,12 @@ func (s *Server) handleOutput(target string) http.HandlerFunc {
 				writeError(w, http.StatusBadGateway, fmt.Sprintf("refresh cache failed: %v", err))
 				return
 			}
-			writeOutput(w, target, result[target])
+			content = result[target]
+			lastModified := s.lastCacheRun
+			if lastModified.IsZero() {
+				lastModified = time.Now()
+			}
+			s.writeOutput(w, r, target, content, lastModified)
 			return
 		}
 
@@ -1527,7 +1633,7 @@ func (s *Server) handleOutput(target string) http.HandlerFunc {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("convert failed: %v", err))
 			return
 		}
-		writeOutput(w, target, content)
+		s.writeOutput(w, r, target, content, time.Now())
 	}
 }
 
@@ -1749,13 +1855,122 @@ func (s *Server) collectNodesRealtime(ctx context.Context) ([]string, error) {
 }
 
 func (s *Server) syncDueUpstreams(ctx context.Context) error {
+	dueIDs, err := s.listDueUpstreamIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(dueIDs) == 0 {
+		return nil
+	}
+
+	okCount, errs := s.syncUpstreamBatch(ctx, dueIDs, "scheduler")
+	if len(errs) > 0 {
+		return fmt.Errorf("due sync partial failure: success=%d failed=%d: %s", okCount, len(errs), strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (s *Server) syncAllUpstreams(ctx context.Context, triggerSource string) error {
+	start := time.Now()
+	concurrency := s.syncMaxConcurrency()
+	maxAttempts := s.syncRetryMaxAttempts()
+	s.writeSystemLogWithMeta(
+		ctx,
+		"info",
+		"sync",
+		"sync_all_start",
+		"start",
+		0,
+		fmt.Sprintf("trigger=%s concurrency=%d retry_attempts=%d", triggerSource, concurrency, maxAttempts),
+	)
+
+	ids, err := s.listEnabledUpstreamIDs(ctx)
+	if err != nil {
+		if s.metrics != nil {
+			s.metrics.observeSyncBatch(triggerSource, "fail", time.Since(start))
+		}
+		return err
+	}
+	if len(ids) == 0 {
+		duration := time.Since(start)
+		if s.metrics != nil {
+			s.metrics.observeSyncBatch(triggerSource, "ok", duration)
+		}
+		s.writeSystemLogWithMeta(
+			ctx,
+			"info",
+			"sync",
+			"sync_all_finish",
+			"ok",
+			duration.Milliseconds(),
+			fmt.Sprintf("trigger=%s success=0 failed=0 duration_ms=%d concurrency=%d retry_attempts=%d", triggerSource, duration.Milliseconds(), concurrency, maxAttempts),
+		)
+		return nil
+	}
+
+	okCount, errs := s.syncUpstreamBatch(ctx, ids, triggerSource)
+	if len(errs) > 0 {
+		duration := time.Since(start)
+		if s.metrics != nil {
+			s.metrics.observeSyncBatch(triggerSource, "fail", duration)
+		}
+		s.writeSystemLogWithMeta(
+			ctx,
+			"error",
+			"sync",
+			"sync_all_finish",
+			"fail",
+			duration.Milliseconds(),
+			fmt.Sprintf("trigger=%s success=%d failed=%d duration_ms=%d concurrency=%d retry_attempts=%d", triggerSource, okCount, len(errs), duration.Milliseconds(), concurrency, maxAttempts),
+		)
+		return errors.New(strings.Join(errs, "; "))
+	}
+	duration := time.Since(start)
+	if s.metrics != nil {
+		s.metrics.observeSyncBatch(triggerSource, "ok", duration)
+	}
+	s.writeSystemLogWithMeta(
+		ctx,
+		"info",
+		"sync",
+		"sync_all_finish",
+		"ok",
+		duration.Milliseconds(),
+		fmt.Sprintf("trigger=%s success=%d failed=%d duration_ms=%d concurrency=%d retry_attempts=%d", triggerSource, okCount, 0, duration.Milliseconds(), concurrency, maxAttempts),
+	)
+	return nil
+}
+
+func (s *Server) listEnabledUpstreamIDs(ctx context.Context) ([]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM upstreams WHERE enabled = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("query enabled upstreams: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int, 0)
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan enabled upstream id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate enabled upstreams: %w", err)
+	}
+	return ids, nil
+}
+
+func (s *Server) listDueUpstreamIDs(ctx context.Context) ([]int, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, refresh_interval, last_sync_at
 		FROM upstreams
 		WHERE enabled = 1`)
 	if err != nil {
-		return fmt.Errorf("query due upstreams: %w", err)
+		return nil, fmt.Errorf("query due upstreams: %w", err)
 	}
+	defer rows.Close()
 
 	dueIDs := make([]int, 0)
 	now := time.Now()
@@ -1764,7 +1979,7 @@ func (s *Server) syncDueUpstreams(ctx context.Context) error {
 		var interval int
 		var lastSync sql.NullTime
 		if err := rows.Scan(&id, &interval, &lastSync); err != nil {
-			return fmt.Errorf("scan upstream due row: %w", err)
+			return nil, fmt.Errorf("scan upstream due row: %w", err)
 		}
 		if interval <= 0 {
 			interval = 60
@@ -1775,74 +1990,56 @@ func (s *Server) syncDueUpstreams(ctx context.Context) error {
 		dueIDs = append(dueIDs, id)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("iterate due upstreams: %w", err)
+		return nil, fmt.Errorf("iterate due upstreams: %w", err)
 	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close due upstream rows: %w", err)
-	}
-
-	for _, id := range dueIDs {
-		if err := s.syncUpstream(ctx, id, "scheduler"); err != nil {
-			s.logger.Printf("sync upstream %d failed: %v", id, err)
-		}
-	}
-	return nil
+	return dueIDs, nil
 }
 
-func (s *Server) syncAllUpstreams(ctx context.Context, triggerSource string) error {
-	start := time.Now()
-	s.writeSystemLog(ctx, "info", "sync", "sync_all_start", fmt.Sprintf("trigger=%s", triggerSource))
-
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM upstreams WHERE enabled = 1`)
-	if err != nil {
-		return fmt.Errorf("query enabled upstreams: %w", err)
+func (s *Server) syncUpstreamBatch(ctx context.Context, ids []int, triggerSource string) (int, []string) {
+	if len(ids) == 0 {
+		return 0, nil
 	}
 
-	ids := make([]int, 0)
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan enabled upstream id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("iterate enabled upstreams: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close enabled upstream rows: %w", err)
+	workerCount := s.syncMaxConcurrency()
+	if workerCount > len(ids) {
+		workerCount = len(ids)
 	}
 
-	var errs []string
-	okCount := 0
+	jobs := make(chan int)
+	results := make(chan syncJobResult, len(ids))
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range jobs {
+				results <- syncJobResult{
+					id:  id,
+					err: s.syncUpstream(ctx, id, triggerSource),
+				}
+			}
+		}()
+	}
+
 	for _, id := range ids {
-		if err := s.syncUpstream(ctx, id, triggerSource); err != nil {
-			errs = append(errs, fmt.Sprintf("%d:%v", id, err))
+		jobs <- id
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	okCount := 0
+	errs := make([]string, 0)
+	for result := range results {
+		if result.err != nil {
+			errs = append(errs, fmt.Sprintf("%d:%v", result.id, result.err))
 			continue
 		}
 		okCount++
 	}
-	if len(errs) > 0 {
-		s.writeSystemLog(
-			ctx,
-			"error",
-			"sync",
-			"sync_all_finish",
-			fmt.Sprintf("trigger=%s success=%d failed=%d duration_ms=%d", triggerSource, okCount, len(errs), time.Since(start).Milliseconds()),
-		)
-		return errors.New(strings.Join(errs, "; "))
-	}
-	s.writeSystemLog(
-		ctx,
-		"info",
-		"sync",
-		"sync_all_finish",
-		fmt.Sprintf("trigger=%s success=%d failed=%d duration_ms=%d", triggerSource, okCount, 0, time.Since(start).Milliseconds()),
-	)
-	return nil
+	sort.Strings(errs)
+	return okCount, errs
 }
 
 func (s *Server) syncUpstream(ctx context.Context, id int, triggerSource string) error {
@@ -1853,45 +2050,103 @@ func (s *Server) syncUpstream(ctx context.Context, id int, triggerSource string)
 	var enabledInt int
 	if err := s.db.QueryRowContext(ctx, `SELECT name, url, enabled FROM upstreams WHERE id = ?`, id).Scan(&name, &url, &enabledInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			s.writeSyncLog(ctx, id, "", triggerSource, "fail", 0, time.Since(start).Milliseconds(), "upstream not found")
+			duration := time.Since(start)
+			s.writeSyncLog(ctx, id, "", triggerSource, "fail", 0, duration.Milliseconds(), "upstream not found")
+			if s.metrics != nil {
+				s.metrics.observeSyncUpstream(triggerSource, "fail", "not_found", 0, duration)
+			}
 			return fmt.Errorf("upstream %d not found", id)
 		}
-		s.writeSyncLog(ctx, id, "", triggerSource, "fail", 0, time.Since(start).Milliseconds(), fmt.Sprintf("query upstream failed: %v", err))
+		duration := time.Since(start)
+		s.writeSyncLog(ctx, id, "", triggerSource, "fail", 0, duration.Milliseconds(), fmt.Sprintf("query upstream failed: %v", err))
+		if s.metrics != nil {
+			s.metrics.observeSyncUpstream(triggerSource, "fail", "db_query_error", 0, duration)
+		}
 		return fmt.Errorf("query upstream %d: %w", id, err)
 	}
 	if enabledInt != 1 {
-		s.writeSyncLog(ctx, id, name, triggerSource, "skipped", 0, time.Since(start).Milliseconds(), "upstream disabled")
+		duration := time.Since(start)
+		s.writeSyncLog(ctx, id, name, triggerSource, "skipped", 0, duration.Milliseconds(), "upstream disabled")
+		if s.metrics != nil {
+			s.metrics.observeSyncUpstream(triggerSource, "skipped", "disabled", 0, duration)
+		}
 		return nil
 	}
 
-	nodes, err := s.fetchUpstreamNodes(ctx, url)
-	if err != nil {
-		status := fmt.Sprintf("sync failed: %v", err)
-		_, _ = s.db.ExecContext(ctx, `UPDATE upstreams SET last_sync_at = CURRENT_TIMESTAMP, last_status = ? WHERE id = ?`, status, id)
-		durationMs := time.Since(start).Milliseconds()
-		s.writeSyncLog(ctx, id, name, triggerSource, "fail", 0, durationMs, err.Error())
-		s.writeSystemLog(ctx, "error", "sync", "sync_upstream", fmt.Sprintf("upstream_id=%d upstream_name=%s trigger=%s duration_ms=%d detail=%s", id, name, triggerSource, durationMs, err.Error()))
-		return err
+	maxAttempts := s.syncRetryMaxAttempts()
+	retryCount := 0
+	lastErr := error(nil)
+	lastNodeCount := 0
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		nodes, err := s.fetchUpstreamNodes(ctx, url)
+		if err == nil {
+			lastNodeCount = len(nodes)
+			status := fmt.Sprintf("ok (%d nodes)", len(nodes))
+			if _, saveErr := s.db.ExecContext(
+				ctx,
+				`UPDATE upstreams SET last_sync_at = CURRENT_TIMESTAMP, last_status = ?, cached_content = ? WHERE id = ?`,
+				status,
+				strings.Join(nodes, "\n"),
+				id,
+			); saveErr != nil {
+				lastErr = fmt.Errorf("update upstream cache: %w", saveErr)
+				break
+			}
+			durationMs := time.Since(start).Milliseconds()
+			detail := fmt.Sprintf("ok retry_count=%d", retryCount)
+			s.writeSyncLog(ctx, id, name, triggerSource, "ok", len(nodes), durationMs, detail)
+			if s.metrics != nil {
+				s.metrics.observeSyncUpstream(triggerSource, "ok", "none", retryCount, time.Duration(durationMs)*time.Millisecond)
+			}
+			return nil
+		}
+
+		lastErr = err
+		if attempt >= maxAttempts || !s.isRetryableSyncError(err) {
+			break
+		}
+
+		retryCount++
+		delay := s.syncRetryDelay(retryCount)
+		errorClass := s.classifySyncError(err)
+		s.writeSystemLogWithMeta(
+			ctx,
+			"warning",
+			"sync",
+			"sync_upstream_retry",
+			"retry",
+			time.Since(start).Milliseconds(),
+			fmt.Sprintf("upstream_id=%d upstream_name=%s trigger=%s retry=%d max_retry=%d delay_ms=%d class=%s detail=%s", id, name, triggerSource, retryCount, maxAttempts-1, delay.Milliseconds(), errorClass, err.Error()),
+		)
+		if waitErr := waitContext(ctx, delay); waitErr != nil {
+			lastErr = waitErr
+			break
+		}
 	}
 
-	status := fmt.Sprintf("ok (%d nodes)", len(nodes))
-	_, err = s.db.ExecContext(
-		ctx,
-		`UPDATE upstreams SET last_sync_at = CURRENT_TIMESTAMP, last_status = ?, cached_content = ? WHERE id = ?`,
-		status,
-		strings.Join(nodes, "\n"),
-		id,
-	)
-	if err != nil {
-		durationMs := time.Since(start).Milliseconds()
-		err = fmt.Errorf("update upstream cache: %w", err)
-		s.writeSyncLog(ctx, id, name, triggerSource, "fail", len(nodes), durationMs, err.Error())
-		s.writeSystemLog(ctx, "error", "sync", "sync_upstream", fmt.Sprintf("upstream_id=%d upstream_name=%s trigger=%s duration_ms=%d detail=%s", id, name, triggerSource, durationMs, err.Error()))
-		return err
+	if lastErr == nil {
+		lastErr = errors.New("unknown sync error")
 	}
+	status := fmt.Sprintf("sync failed: %v", lastErr)
+	_, _ = s.db.ExecContext(ctx, `UPDATE upstreams SET last_sync_at = CURRENT_TIMESTAMP, last_status = ? WHERE id = ?`, status, id)
 	durationMs := time.Since(start).Milliseconds()
-	s.writeSyncLog(ctx, id, name, triggerSource, "ok", len(nodes), durationMs, status)
-	return nil
+	errorClass := s.classifySyncError(lastErr)
+	detail := fmt.Sprintf("class=%s retry_count=%d detail=%s", errorClass, retryCount, lastErr.Error())
+	s.writeSyncLog(ctx, id, name, triggerSource, "fail", lastNodeCount, durationMs, detail)
+	s.writeSystemLogWithMeta(
+		ctx,
+		"error",
+		"sync",
+		"sync_upstream",
+		"fail",
+		durationMs,
+		fmt.Sprintf("upstream_id=%d upstream_name=%s trigger=%s duration_ms=%d retry_count=%d class=%s detail=%s", id, name, triggerSource, durationMs, retryCount, errorClass, lastErr.Error()),
+	)
+	if s.metrics != nil {
+		s.metrics.observeSyncUpstream(triggerSource, "fail", errorClass, retryCount, time.Duration(durationMs)*time.Millisecond)
+	}
+	return lastErr
 }
 
 func (s *Server) fetchUpstreamNodes(ctx context.Context, url string) ([]string, error) {
@@ -1905,16 +2160,31 @@ func (s *Server) fetchUpstreamNodes(ctx context.Context, url string) ([]string, 
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch upstream: %w", err)
+		wrappedErr := fmt.Errorf("fetch upstream: %w", err)
+		if errors.Is(err, context.Canceled) {
+			return nil, wrappedErr
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, &retryableSyncError{err: wrappedErr}
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return nil, &retryableSyncError{err: wrappedErr}
+		}
+		return nil, wrappedErr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
+		statusErr := &upstreamHTTPStatusError{StatusCode: resp.StatusCode}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+			return nil, &retryableSyncError{err: statusErr}
+		}
+		return nil, statusErr
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read upstream: %w", err)
+		return nil, &retryableSyncError{err: fmt.Errorf("read upstream: %w", err)}
 	}
 
 	parsed := parseSubscription(body)
@@ -2427,6 +2697,11 @@ func (s *Server) writeSyncLog(ctx context.Context, upstreamID int, upstreamName,
 }
 
 func (s *Server) writeSystemLog(ctx context.Context, level, category, action, detail string) {
+	s.writeSystemLogWithMeta(ctx, level, category, action, level, 0, detail)
+}
+
+func (s *Server) writeSystemLogWithMeta(ctx context.Context, level, category, action, result string, durationMs int64, detail string) {
+	encoded := s.formatSystemLogDetail(ctx, category, action, result, durationMs, detail)
 	_, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO system_logs(level, category, action, detail, created_at)
@@ -2434,11 +2709,29 @@ func (s *Server) writeSystemLog(ctx context.Context, level, category, action, de
 		strings.TrimSpace(level),
 		strings.TrimSpace(category),
 		strings.TrimSpace(action),
-		strings.TrimSpace(detail),
+		encoded,
 	)
 	if err != nil {
 		s.logger.Printf("write system log failed: %v", err)
+		return
 	}
+	s.logger.Printf("system_log %s", encoded)
+}
+
+func (s *Server) formatSystemLogDetail(ctx context.Context, category, action, result string, durationMs int64, detail string) string {
+	payload := map[string]any{
+		"request_id":  strings.TrimSpace(chimw.GetReqID(ctx)),
+		"module":      strings.TrimSpace(category),
+		"action":      strings.TrimSpace(action),
+		"result":      strings.TrimSpace(result),
+		"duration_ms": durationMs,
+		"detail":      strings.TrimSpace(detail),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return strings.TrimSpace(detail)
+	}
+	return string(raw)
 }
 
 func (s *Server) runAutoBackupIfDue(ctx context.Context, settings *Settings) error {
@@ -2612,14 +2905,401 @@ func (s *Server) cacheFile(target string) string {
 	return filepath.Join(s.cfg.CacheDir, filename)
 }
 
-func writeOutput(w http.ResponseWriter, target, content string) {
+func (s *Server) writeOutput(w http.ResponseWriter, r *http.Request, target, content string, lastModified time.Time) {
 	if target == "clash" {
 		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
 	} else {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	}
+
+	if s.cfg.OutputETagEnabled {
+		etag := buildOutputETag(content)
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", s.outputCacheControl())
+		if !lastModified.IsZero() {
+			w.Header().Set("Last-Modified", lastModified.UTC().Format(http.TimeFormat))
+		}
+		if etagMatches(r.Header.Get("If-None-Match"), etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(content))
+}
+
+func (s *Server) buildAuthCookie(tokenValue string, expiresAt time.Time, clear bool) *http.Cookie {
+	cookie := &http.Cookie{
+		Name:     s.authCookieName,
+		Value:    tokenValue,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.cfg.AuthCookieSecure,
+		SameSite: parseCookieSameSite(s.cfg.AuthCookieSameSite),
+	}
+	if domain := strings.TrimSpace(s.cfg.AuthCookieDomain); domain != "" {
+		cookie.Domain = domain
+	}
+	if clear {
+		cookie.Expires = time.Unix(0, 0)
+		cookie.MaxAge = -1
+		return cookie
+	}
+	cookie.Expires = expiresAt
+	return cookie
+}
+
+func parseCookieSameSite(raw string) http.SameSite {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "strict":
+		return http.SameSiteStrictMode
+	case "none":
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
+
+func requestClientIP(r *http.Request) string {
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if remote == "" {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(remote)
+	if err == nil && strings.TrimSpace(host) != "" {
+		return strings.TrimSpace(host)
+	}
+	return remote
+}
+
+func normalizeLoginKey(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return "unknown"
+	}
+	return normalized
+}
+
+func joinLoginKey(ip, username string) string {
+	return normalizeLoginKey(ip) + "|" + normalizeLoginKey(username)
+}
+
+func (s *Server) checkLoginAllowed(clientIP, username string) error {
+	if !s.cfg.LoginProtectionEnabled {
+		return nil
+	}
+
+	now := time.Now()
+	window := s.loginRateWindow()
+	maxIP := s.loginRateMaxIP()
+	maxUser := s.loginRateMaxUser()
+	keyIP := normalizeLoginKey(clientIP)
+	keyUser := normalizeLoginKey(username)
+	pairKey := joinLoginKey(clientIP, username)
+
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	s.cleanupLoginStateLocked(now, window)
+
+	if lockedUntil, ok := s.loginLocks[pairKey]; ok && now.Before(lockedUntil) {
+		return fmt.Errorf("login temporarily locked, retry after %d seconds", secondsUntil(lockedUntil, now))
+	}
+
+	if maxIP > 0 {
+		count, resetIn := bumpLoginWindowLocked(s.loginIPWindows, keyIP, now, window)
+		if count > maxIP {
+			return fmt.Errorf("too many login attempts from this IP, retry after %d seconds", secondsFromDuration(resetIn))
+		}
+	}
+	if maxUser > 0 {
+		count, resetIn := bumpLoginWindowLocked(s.loginUserWindow, keyUser, now, window)
+		if count > maxUser {
+			return fmt.Errorf("too many login attempts for this username, retry after %d seconds", secondsFromDuration(resetIn))
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) recordLoginFailure(clientIP, username string) (bool, int) {
+	if !s.cfg.LoginProtectionEnabled {
+		return false, 0
+	}
+
+	threshold := s.loginLockThreshold()
+	if threshold <= 0 {
+		return false, 0
+	}
+
+	now := time.Now()
+	pairKey := joinLoginKey(clientIP, username)
+	lockDuration := s.loginLockDuration()
+
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	s.cleanupLoginStateLocked(now, s.loginRateWindow())
+
+	failedCount := s.loginFailures[pairKey] + 1
+	if failedCount >= threshold {
+		lockUntil := now.Add(lockDuration)
+		s.loginLocks[pairKey] = lockUntil
+		delete(s.loginFailures, pairKey)
+		return true, secondsUntil(lockUntil, now)
+	}
+	s.loginFailures[pairKey] = failedCount
+	return false, 0
+}
+
+func (s *Server) recordLoginSuccess(clientIP, username string) {
+	if !s.cfg.LoginProtectionEnabled {
+		return
+	}
+	pairKey := joinLoginKey(clientIP, username)
+
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	delete(s.loginFailures, pairKey)
+	delete(s.loginLocks, pairKey)
+}
+
+func (s *Server) cleanupLoginStateLocked(now time.Time, window time.Duration) {
+	for key, value := range s.loginIPWindows {
+		if now.Sub(value.windowStart) >= window {
+			delete(s.loginIPWindows, key)
+		}
+	}
+	for key, value := range s.loginUserWindow {
+		if now.Sub(value.windowStart) >= window {
+			delete(s.loginUserWindow, key)
+		}
+	}
+	for key, value := range s.loginLocks {
+		if !now.Before(value) {
+			delete(s.loginLocks, key)
+		}
+	}
+}
+
+func bumpLoginWindowLocked(windows map[string]loginAttemptWindow, key string, now time.Time, window time.Duration) (int, time.Duration) {
+	entry, ok := windows[key]
+	if !ok || now.Sub(entry.windowStart) >= window {
+		entry = loginAttemptWindow{
+			windowStart: now,
+			count:       0,
+		}
+	}
+	entry.count++
+	windows[key] = entry
+	resetIn := window - now.Sub(entry.windowStart)
+	if resetIn < 0 {
+		resetIn = 0
+	}
+	return entry.count, resetIn
+}
+
+func (s *Server) loginRateWindow() time.Duration {
+	if s.cfg.LoginRateWindow <= 0 {
+		return defaultLoginRateWindow
+	}
+	return s.cfg.LoginRateWindow
+}
+
+func (s *Server) loginRateMaxIP() int {
+	if s.cfg.LoginRateMaxIP <= 0 {
+		return defaultLoginRateMaxIP
+	}
+	return s.cfg.LoginRateMaxIP
+}
+
+func (s *Server) loginRateMaxUser() int {
+	if s.cfg.LoginRateMaxUsername <= 0 {
+		return defaultLoginRateMaxUser
+	}
+	return s.cfg.LoginRateMaxUsername
+}
+
+func (s *Server) loginLockThreshold() int {
+	if s.cfg.LoginLockThreshold <= 0 {
+		return defaultLoginLockThreshold
+	}
+	return s.cfg.LoginLockThreshold
+}
+
+func (s *Server) loginLockDuration() time.Duration {
+	if s.cfg.LoginLockDuration <= 0 {
+		return defaultLoginLockDuration
+	}
+	return s.cfg.LoginLockDuration
+}
+
+func (s *Server) outputCacheControl() string {
+	value := strings.TrimSpace(s.cfg.OutputCacheControl)
+	if value == "" {
+		return defaultOutputCacheControl
+	}
+	return value
+}
+
+func (s *Server) syncMaxConcurrency() int {
+	if s.cfg.SyncMaxConcurrency <= 0 {
+		return defaultSyncMaxConcurrency
+	}
+	return s.cfg.SyncMaxConcurrency
+}
+
+func (s *Server) syncRetryMaxAttempts() int {
+	if s.cfg.SyncRetryMaxAttempts <= 0 {
+		return defaultSyncRetryAttempts
+	}
+	return s.cfg.SyncRetryMaxAttempts
+}
+
+func (s *Server) syncRetryBaseDelay() time.Duration {
+	if s.cfg.SyncRetryBaseDelay <= 0 {
+		return defaultSyncRetryBaseDelay
+	}
+	return s.cfg.SyncRetryBaseDelay
+}
+
+func (s *Server) syncRetryMaxDelay() time.Duration {
+	if s.cfg.SyncRetryMaxDelay <= 0 {
+		return defaultSyncRetryMaxDelay
+	}
+	return s.cfg.SyncRetryMaxDelay
+}
+
+func (s *Server) syncRetryDelay(retryCount int) time.Duration {
+	delay := s.syncRetryBaseDelay()
+	if retryCount <= 1 {
+		return delay
+	}
+	maxDelay := s.syncRetryMaxDelay()
+	for i := 1; i < retryCount; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (s *Server) isRetryableSyncError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var retryableErr *retryableSyncError
+	if errors.As(err, &retryableErr) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func (s *Server) classifySyncError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var statusErr *upstreamHTTPStatusError
+	if errors.As(err, &statusErr) {
+		switch {
+		case statusErr.StatusCode == http.StatusTooManyRequests:
+			return "upstream_rate_limited"
+		case statusErr.StatusCode >= http.StatusInternalServerError:
+			return "upstream_5xx"
+		case statusErr.StatusCode >= http.StatusBadRequest:
+			return "upstream_4xx"
+		default:
+			return "upstream_http_error"
+		}
+	}
+	raw := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(raw, "subscription contains no nodes"):
+		return "subscription_no_nodes"
+	case strings.Contains(raw, "empty upstream url"):
+		return "invalid_upstream_url"
+	case strings.Contains(raw, "update upstream cache"):
+		return "db_write_error"
+	case strings.Contains(raw, "fetch upstream"):
+		return "upstream_fetch_error"
+	case strings.Contains(raw, "read upstream"):
+		return "upstream_read_error"
+	}
+	if s.isRetryableSyncError(err) {
+		return "transient_error"
+	}
+	return "unknown_error"
+}
+
+func buildOutputETag(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf(`"%x"`, sum[:])
+}
+
+func etagMatches(ifNoneMatch, currentETag string) bool {
+	header := strings.TrimSpace(ifNoneMatch)
+	if header == "" {
+		return false
+	}
+	if header == "*" {
+		return true
+	}
+	normalizedCurrent := normalizeETag(currentETag)
+	for _, token := range strings.Split(header, ",") {
+		if normalizeETag(token) == normalizedCurrent {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeETag(value string) string {
+	normalized := strings.TrimSpace(value)
+	normalized = strings.TrimPrefix(normalized, "W/")
+	normalized = strings.TrimPrefix(normalized, "w/")
+	return strings.TrimSpace(normalized)
+}
+
+func secondsFromDuration(value time.Duration) int {
+	seconds := int(math.Ceil(value.Seconds()))
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
+func secondsUntil(until, now time.Time) int {
+	return secondsFromDuration(until.Sub(now))
 }
 
 func parseIDParam(r *http.Request, key string) (int, error) {
