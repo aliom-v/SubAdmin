@@ -24,7 +24,7 @@ cp .env.example .env
 # 首次部署必须修改以下两项
 # ADMIN_PASSWORD=你的强密码
 # JWT_SECRET=长度至少16位的随机字符串
-docker compose up -d --build api web sublink
+make up
 ```
 
 默认访问地址（共存模式）：
@@ -41,7 +41,7 @@ docker compose up -d --build api web sublink
 ```bash
 curl -fsS http://127.0.0.1:18080/healthz
 curl -fsS http://127.0.0.1:18080/metrics | head
-docker compose ps
+make ps
 ```
 
 统一命令入口：
@@ -50,6 +50,7 @@ docker compose ps
 make verify
 make acceptance
 make pressure
+make logs SERVICE=api
 ```
 
 说明：
@@ -57,11 +58,12 @@ make pressure
 - `make verify`：完整校验（需要 Go 1.22+、Node.js 20+ 与 npm）
 - `make acceptance`：执行 Phase 4 回归脚本
 - `make pressure`：执行 Phase 4 压测抽检，报告默认输出到 `data/reports/`
+- `make logs SERVICE=api`：查看指定服务最近日志；不传 `SERVICE` 时默认查看 `api web sublink`
 
 ## 部署模式
 
-- 共存模式（推荐）：`docker compose up -d --build api web sublink`
-- 网关模式（走 80/443）：先在 `.env` 设置 `DOMAIN`，再执行 `docker compose --profile gateway up -d --build`
+- 共存模式（推荐）：`make up`
+- 网关模式（走 80/443）：先在 `.env` 设置 `DOMAIN`，再执行 `make gateway-up`
 
 网关模式访问：
 
