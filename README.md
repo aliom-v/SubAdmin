@@ -14,6 +14,7 @@ SubAdmin 是一个面向 Clash / Sing-box 的自托管订阅管理面板。
 前置条件：
 
 - 已安装 Docker 与 Docker Compose
+- 本地环境文件请从 `.env.example` 复制生成 `.env`，`.env` 不纳入 Git 跟踪
 
 ```bash
 git clone git@github.com:aliom-v/SubAdmin.git

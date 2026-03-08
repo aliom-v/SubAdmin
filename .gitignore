@@ -1,6 +1,11 @@
 # runtime data
 /data/
 
+# local environment
+.env
+.env.local
+.env.*.local
+
 # web
 web/node_modules/
 web/dist/
