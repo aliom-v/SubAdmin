@@ -48,6 +48,36 @@ NODE_PAYLOAD='{"name":"phase4-node","raw_uri":"ss://YWVzLTI1Ni1nY206cGFzc0BleGFt
 NODE_CODE="$(curl -sS -o "${TMP_DIR}/node.json" -w '%{http_code}' -X POST "${API_BASE}/api/nodes" -H "${AUTH_HEADER}" -H 'Content-Type: application/json' -d "${NODE_PAYLOAD}")"
 [[ "${NODE_CODE}" == "201" ]]
 
+echo "[phase4] strategy api regression"
+curl -fsS "${API_BASE}/api/strategy" -H "${AUTH_HEADER}" >"${TMP_DIR}/strategy-get.json"
+grep -q '"strategy_mode":"merge_dedupe"' "${TMP_DIR}/strategy-get.json"
+
+STRATEGY_UPSTREAM_PAYLOAD='{"name":"phase4-strategy-upstream","url":"http://example.com/sub","enabled":true,"refresh_interval":60}'
+STRATEGY_UPSTREAM_CODE="$(curl -sS -o "${TMP_DIR}/strategy-upstream.json" -w '%{http_code}' -X POST "${API_BASE}/api/upstreams" -H "${AUTH_HEADER}" -H 'Content-Type: application/json' -d "${STRATEGY_UPSTREAM_PAYLOAD}")"
+[[ "${STRATEGY_UPSTREAM_CODE}" == "201" ]]
+STRATEGY_UPSTREAM_ID="$(sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' "${TMP_DIR}/strategy-upstream.json")"
+[[ -n "${STRATEGY_UPSTREAM_ID}" ]]
+
+STRATEGY_RAW_PAYLOAD='{"content":"trojan://password@example.net:443#phase4"}'
+STRATEGY_RAW_CODE="$(curl -sS -o "${TMP_DIR}/strategy-raw.json" -w '%{http_code}' -X PUT "${API_BASE}/api/upstreams/${STRATEGY_UPSTREAM_ID}/raw" -H "${AUTH_HEADER}" -H 'Content-Type: application/json' -d "${STRATEGY_RAW_PAYLOAD}")"
+[[ "${STRATEGY_RAW_CODE}" == "200" ]]
+
+printf -v STRATEGY_PAYLOAD '{"strategy_mode":"priority_override","manual_nodes_priority":0,"rename_suffix_format":"[{source}]","upstreams":[{"id":%s,"priority":10}]}' "${STRATEGY_UPSTREAM_ID}"
+
+STRATEGY_PREVIEW_CODE="$(curl -sS -o "${TMP_DIR}/strategy-preview.json" -w '%{http_code}' -X POST "${API_BASE}/api/strategy/preview" -H "${AUTH_HEADER}" -H 'Content-Type: application/json' -d "${STRATEGY_PAYLOAD}")"
+[[ "${STRATEGY_PREVIEW_CODE}" == "200" ]]
+grep -q '"strategy_mode":"priority_override"' "${TMP_DIR}/strategy-preview.json"
+grep -q '"output_nodes":1' "${TMP_DIR}/strategy-preview.json"
+grep -q '"dropped_nodes":1' "${TMP_DIR}/strategy-preview.json"
+grep -q '"winner_source":"manual"' "${TMP_DIR}/strategy-preview.json"
+
+STRATEGY_PUT_CODE="$(curl -sS -o "${TMP_DIR}/strategy-put.json" -w '%{http_code}' -X PUT "${API_BASE}/api/strategy" -H "${AUTH_HEADER}" -H 'Content-Type: application/json' -d "${STRATEGY_PAYLOAD}")"
+[[ "${STRATEGY_PUT_CODE}" == "200" ]]
+grep -q '"strategy_mode":"priority_override"' "${TMP_DIR}/strategy-put.json"
+
+curl -fsS "${API_BASE}/api/strategy" -H "${AUTH_HEADER}" >"${TMP_DIR}/strategy-after-put.json"
+grep -q '"strategy_mode":"priority_override"' "${TMP_DIR}/strategy-after-put.json"
+
 echo "[phase4] output endpoint + etag drill"
 CLASH_HEADERS="${TMP_DIR}/clash.headers"
 CLASH_CODE="$(curl -sS -D "${CLASH_HEADERS}" -o "${TMP_DIR}/clash.body" -w '%{http_code}' "${API_BASE}/clash")"
@@ -90,6 +120,8 @@ curl -fsS "${API_BASE}/api/logs/system?limit=200" -H "${AUTH_HEADER}" >"${TMP_DI
 # `detail` is a JSON string in API response, so inner keys may appear escaped.
 grep -q 'request_id' "${TMP_DIR}/system-logs.json"
 grep -q 'sync_upstream_retry' "${TMP_DIR}/system-logs.json"
+grep -q 'update_strategy' "${TMP_DIR}/system-logs.json"
+grep -q 'preview_strategy' "${TMP_DIR}/system-logs.json"
 
 curl -fsS "${API_BASE}/api/logs/sync?limit=200" -H "${AUTH_HEADER}" >"${TMP_DIR}/sync-logs.json"
 grep -q '"status":"fail"' "${TMP_DIR}/sync-logs.json"

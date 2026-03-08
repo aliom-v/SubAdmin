@@ -141,6 +141,18 @@ func Init(ctx context.Context, db *sql.DB, defaultAdmin, defaultPassword string,
 	if err := ensureSetting(ctx, db, "auto_backup_last_at", ""); err != nil {
 		return err
 	}
+	if err := ensureSetting(ctx, db, "strategy_mode", "merge_dedupe"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "manual_nodes_priority", "0"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "rename_suffix_format", "[{source}]"); err != nil {
+		return err
+	}
+	if err := ensureSetting(ctx, db, "upstream_priorities", "{}"); err != nil {
+		return err
+	}
 	return nil
 }
 

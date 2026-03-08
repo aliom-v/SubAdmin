@@ -7,6 +7,7 @@ SubAdmin 是一个面向 Clash / Sing-box 的自托管订阅管理面板。
 
 - 统一管理多个上游订阅与手动节点，并进行去重、汇总与输出
 - 提供固定订阅地址：`/clash`、`/singbox`
+- 已支持高级同步策略最小闭环：策略模式、来源优先级、冲突预览与后台配置入口
 - 支持登录保护、同步重试隔离、输出 ETag/304、自动备份与快照回滚
 - 提供 `/healthz`、`/metrics`、系统日志与同步日志，便于观测与排障
 
@@ -90,13 +91,24 @@ make logs SERVICE=api
 
 - 上游输入应为 URI/base64 节点订阅，不是完整 `yaml/json` 配置文件
 - 容器内访问主机服务不能用 `127.0.0.1/localhost`，应使用域名或 `host.docker.internal:<port>`
-- 当前未覆盖高级同步策略（覆盖/合并/冲突处理）的完整产品化能力
+- 当前已具备高级同步策略最小闭环，但仍未覆盖更细粒度策略能力（按输出目标/按单节点规则等）
+
+## 高级同步策略
+
+- 管理后台已提供“高级同步策略”配置区，可设置策略模式、手动节点优先级、上游优先级并查看 preview 摘要
+- API 已提供：`GET /api/strategy`、`PUT /api/strategy`、`POST /api/strategy/preview`
+- 当前支持的策略模式：`merge_dedupe`、`priority_override`、`keep_both_rename`
+- preview 基于当前缓存上游与启用手动节点计算，不会触发同步或写入输出
+- 缓存模式下，保存策略后会自动刷新输出缓存；非缓存模式下可按需手动执行 `POST /api/sync`
 
 ## 文档导航
 
 - 状态摘要：`docs/STATUS.md`
-- 实施归档：`docs/OPTIMIZATION_PLAN.md`
-- 高级同步策略草案：`docs/ADVANCED_SYNC_STRATEGY.md`
+- 遗留问题与优化清单：`docs/OPEN_ISSUES.md`
+- 高级同步策略设计与实现状态：`docs/ADVANCED_SYNC_STRATEGY.md`
+- 策略上线与回滚：`docs/STRATEGY_ROLLOUT.md`
+- Phase 4 回归与验收记录：`docs/PHASE4_REGRESSION.md`
+- 指标与监控说明：`docs/METRICS.md`
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
 - 前后端源码：`backend/`、`web/`

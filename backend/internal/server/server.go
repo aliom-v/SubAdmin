@@ -362,6 +362,9 @@ func (s *Server) routes() http.Handler {
 
 			private.Get("/settings", s.handleGetSettings)
 			private.Put("/settings", s.handleUpdateSettings)
+			private.Get("/strategy", s.handleGetStrategy)
+			private.Put("/strategy", s.handleUpdateStrategy)
+			private.Post("/strategy/preview", s.handlePreviewStrategy)
 
 			private.Get("/backup/export", s.handleExportBackup)
 			private.Get("/backup/sqlite", s.handleExportSQLiteBackup)
@@ -1784,90 +1787,27 @@ func (s *Server) ensureOutputCache(ctx context.Context, target string) (string, 
 }
 
 func (s *Server) collectNodesFromStore(ctx context.Context) ([]string, error) {
-	nodes := make([]string, 0)
-
-	rows, err := s.db.QueryContext(ctx, `SELECT cached_content FROM upstreams WHERE enabled = 1`)
+	config, err := s.getStrategyConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query upstream cache: %w", err)
+		return nil, fmt.Errorf("load strategy config: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var cached string
-		if err := rows.Scan(&cached); err != nil {
-			return nil, fmt.Errorf("scan upstream cache: %w", err)
-		}
-		nodes = append(nodes, splitNodes(cached)...)
-	}
-
-	manualRows, err := s.db.QueryContext(ctx, `SELECT raw_uri FROM manual_nodes WHERE enabled = 1`)
+	sources, err := s.collectStrategySourcesFromStore(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("query manual nodes: %w", err)
+		return nil, err
 	}
-	defer manualRows.Close()
-	for manualRows.Next() {
-		var raw string
-		if err := manualRows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("scan manual node: %w", err)
-		}
-		raw = strings.TrimSpace(raw)
-		if raw != "" {
-			nodes = append(nodes, raw)
-		}
-	}
-
-	return dedupeNodes(nodes), nil
+	return applyNodeStrategy(sources, config).Nodes, nil
 }
 
 func (s *Server) collectNodesRealtime(ctx context.Context) ([]string, error) {
-	nodes := make([]string, 0)
-
-	rows, err := s.db.QueryContext(ctx, `SELECT id, url, enabled, cached_content, last_status FROM upstreams ORDER BY id DESC`)
+	config, err := s.getStrategyConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query upstreams: %w", err)
+		return nil, fmt.Errorf("load strategy config: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int
-		var url string
-		var enabledInt int
-		var cachedContent string
-		var lastStatus string
-		if err := rows.Scan(&id, &url, &enabledInt, &cachedContent, &lastStatus); err != nil {
-			return nil, fmt.Errorf("scan upstream: %w", err)
-		}
-		if enabledInt != 1 {
-			continue
-		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(lastStatus)), "manual raw import") {
-			nodes = append(nodes, splitNodes(cachedContent)...)
-			continue
-		}
-		fetched, fetchErr := s.fetchUpstreamNodes(ctx, strings.TrimSpace(url))
-		if fetchErr != nil {
-			s.logger.Printf("realtime fetch upstream %d failed: %v", id, fetchErr)
-			nodes = append(nodes, splitNodes(cachedContent)...)
-			continue
-		}
-		nodes = append(nodes, fetched...)
-	}
-
-	manualRows, err := s.db.QueryContext(ctx, `SELECT raw_uri FROM manual_nodes WHERE enabled = 1`)
+	sources, err := s.collectStrategySourcesRealtime(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("query manual nodes: %w", err)
+		return nil, err
 	}
-	defer manualRows.Close()
-	for manualRows.Next() {
-		var raw string
-		if err := manualRows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("scan manual node: %w", err)
-		}
-		raw = strings.TrimSpace(raw)
-		if raw != "" {
-			nodes = append(nodes, raw)
-		}
-	}
-
-	return dedupeNodes(nodes), nil
+	return applyNodeStrategy(sources, config).Nodes, nil
 }
 
 func (s *Server) syncDueUpstreams(ctx context.Context) error {

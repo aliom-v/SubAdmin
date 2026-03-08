@@ -23,6 +23,57 @@ const emptyNode = {
   group_name: 'default'
 }
 
+const STRATEGY_MODES = [
+  {
+    id: 'merge_dedupe',
+    label: '合并去重',
+    description: '内容完全相同的节点自动去重；同名但内容不同的节点保留并自动重命名。'
+  },
+  {
+    id: 'priority_override',
+    label: '优先级覆盖',
+    description: '同名冲突时仅保留优先级更高的来源，适合追求稳定唯一输出。'
+  },
+  {
+    id: 'keep_both_rename',
+    label: '全部保留并重命名',
+    description: '同名冲突时尽量全部保留，并为低优先级项自动追加后缀。'
+  }
+]
+
+function defaultUpstreamPriority(index) {
+  return (index + 1) * 10
+}
+
+function normalizeStrategy(data) {
+  const normalizedUpstreams = Array.isArray(data?.upstreams)
+    ? data.upstreams.map((item, index) => ({
+        id: item.id,
+        name: item.name || `upstream-${item.id}`,
+        priority: Number(item.priority) || defaultUpstreamPriority(index)
+      }))
+    : []
+
+  return {
+    strategy_mode: data?.strategy_mode || 'merge_dedupe',
+    manual_nodes_priority: Number(data?.manual_nodes_priority ?? 0),
+    rename_suffix_format: data?.rename_suffix_format || '[{source}]',
+    upstreams: normalizedUpstreams
+  }
+}
+
+function buildStrategyPayload(strategy) {
+  return {
+    strategy_mode: strategy.strategy_mode,
+    manual_nodes_priority: Number(strategy.manual_nodes_priority) || 0,
+    rename_suffix_format: strategy.rename_suffix_format || '[{source}]',
+    upstreams: strategy.upstreams.map((item, index) => ({
+      id: item.id,
+      priority: Number(item.priority) || defaultUpstreamPriority(index)
+    }))
+  }
+}
+
 function App() {
   const [booting, setBooting] = useState(true)
   const [authed, setAuthed] = useState(false)
@@ -33,6 +84,8 @@ function App() {
   const [upstreams, setUpstreams] = useState([])
   const [nodes, setNodes] = useState([])
   const [settings, setSettings] = useState(null)
+  const [strategy, setStrategy] = useState(null)
+  const [strategyPreview, setStrategyPreview] = useState(null)
   const [syncLogs, setSyncLogs] = useState([])
   const [systemLogs, setSystemLogs] = useState([])
   const [tokens, setTokens] = useState([])
@@ -75,21 +128,39 @@ function App() {
     }
   }, [upstreams, nodes])
 
+  const activeStrategyMode =
+    STRATEGY_MODES.find((item) => item.id === strategy?.strategy_mode) || STRATEGY_MODES[0]
+
   async function fetchMe() {
     const me = await apiRequest('/api/me')
     setAdmin(me)
     return me
   }
 
+  async function fetchStrategy() {
+    const data = await apiRequest('/api/strategy')
+    const normalized = normalizeStrategy(data)
+    setStrategy(normalized)
+    return normalized
+  }
+
+  async function refreshUpstreamsAndStrategy() {
+    const [upstreamData, strategyData] = await Promise.all([apiRequest('/api/upstreams'), apiRequest('/api/strategy')])
+    setUpstreams(upstreamData)
+    setStrategy(normalizeStrategy(strategyData))
+  }
+
   async function fetchAll() {
-    const [upstreamData, nodeData, settingsData] = await Promise.all([
+    const [upstreamData, nodeData, settingsData, strategyData] = await Promise.all([
       apiRequest('/api/upstreams'),
       apiRequest('/api/nodes'),
-      apiRequest('/api/settings')
+      apiRequest('/api/settings'),
+      apiRequest('/api/strategy')
     ])
     setUpstreams(upstreamData)
     setNodes(nodeData)
     setSettings(settingsData)
+    setStrategy(normalizeStrategy(strategyData))
   }
 
   async function fetchLogs(limit = logLimit) {
@@ -140,6 +211,8 @@ function App() {
       setUpstreams([])
       setNodes([])
       setSettings(null)
+      setStrategy(null)
+      setStrategyPreview(null)
       setSyncLogs([])
       setSystemLogs([])
       setTokens([])
@@ -166,7 +239,7 @@ function App() {
 
   useEffect(() => {
     if (!authed || activeTab !== 'settings') return
-    fetchTokens().catch((err) => setError(err.message))
+    Promise.all([fetchTokens(), fetchStrategy()]).catch((err) => setError(err.message))
   }, [authed, activeTab])
 
   useEffect(() => {
@@ -194,7 +267,7 @@ function App() {
         body: JSON.stringify(upstreamForm)
       })
       setUpstreamForm(emptyUpstream)
-      setUpstreams(await apiRequest('/api/upstreams'))
+      await refreshUpstreamsAndStrategy()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -210,7 +283,7 @@ function App() {
         method: 'PUT',
         body: JSON.stringify(item)
       })
-      setUpstreams(await apiRequest('/api/upstreams'))
+      await refreshUpstreamsAndStrategy()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -223,7 +296,7 @@ function App() {
     setError('')
     try {
       await apiRequest(`/api/upstreams/${id}`, { method: 'DELETE' })
-      setUpstreams(await apiRequest('/api/upstreams'))
+      await refreshUpstreamsAndStrategy()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -236,7 +309,7 @@ function App() {
     setError('')
     try {
       await apiRequest(`/api/upstreams/${id}/sync`, { method: 'POST' })
-      setUpstreams(await apiRequest('/api/upstreams'))
+      await refreshUpstreamsAndStrategy()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -249,7 +322,7 @@ function App() {
     setError('')
     try {
       await apiRequest('/api/sync', { method: 'POST' })
-      setUpstreams(await apiRequest('/api/upstreams'))
+      await refreshUpstreamsAndStrategy()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -409,6 +482,65 @@ function App() {
     } finally {
       setBusy(false)
     }
+  }
+
+  async function saveStrategy(event) {
+    event.preventDefault()
+    if (!strategy) return
+    setBusy(true)
+    setError('')
+    try {
+      const data = await apiRequest('/api/strategy', {
+        method: 'PUT',
+        body: JSON.stringify(buildStrategyPayload(strategy))
+      })
+      setStrategy(normalizeStrategy(data))
+      setStrategyPreview(null)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function previewStrategyConfig() {
+    if (!strategy) return
+    setBusy(true)
+    setError('')
+    try {
+      const data = await apiRequest('/api/strategy/preview', {
+        method: 'POST',
+        body: JSON.stringify(buildStrategyPayload(strategy))
+      })
+      setStrategyPreview(data)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function updateStrategyField(key, value) {
+    setStrategy((prev) => (prev ? { ...prev, [key]: value } : prev))
+    setStrategyPreview(null)
+  }
+
+  function updateStrategyPriority(id, value, index) {
+    setStrategy((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        upstreams: prev.upstreams.map((item, itemIndex) =>
+          item.id === id
+            ? {
+                ...item,
+                priority: Number(value) || item.priority || defaultUpstreamPriority(itemIndex ?? index)
+              }
+            : item
+        )
+      }
+    })
+    setStrategyPreview(null)
   }
 
   async function changePassword(event) {
@@ -925,6 +1057,149 @@ function App() {
             </label>
             <button disabled={busy}>保存设置</button>
           </form>
+
+          <div className="section-block strategy-panel">
+            <div>
+              <h3>高级同步策略</h3>
+              <p className="strategy-note">
+                对 `/clash` 与 `/singbox` 聚合输出生效。预览基于当前缓存上游和已启用手动节点，不会触发同步。
+              </p>
+            </div>
+
+            {strategy ? (
+              <form className="settings" onSubmit={saveStrategy}>
+                <div className="strategy-grid">
+                  <label>
+                    策略模式
+                    <select
+                      value={strategy.strategy_mode}
+                      onChange={(e) => updateStrategyField('strategy_mode', e.target.value)}
+                    >
+                      {STRATEGY_MODES.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    手动节点优先级
+                    <input
+                      type="number"
+                      value={strategy.manual_nodes_priority}
+                      onChange={(e) => updateStrategyField('manual_nodes_priority', Number(e.target.value) || 0)}
+                    />
+                  </label>
+                  <label>
+                    重命名后缀模板
+                    <input
+                      value={strategy.rename_suffix_format}
+                      placeholder="[{source}]"
+                      onChange={(e) => updateStrategyField('rename_suffix_format', e.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <div className="log-meta">{activeStrategyMode.description}</div>
+
+                <div className="strategy-priority-list">
+                  <strong>上游优先级</strong>
+                  {strategy.upstreams.length === 0 && <p className="muted">暂无上游，当前仅手动节点参与聚合。</p>}
+                  {strategy.upstreams.map((item, index) => (
+                    <div className="strategy-priority-row" key={item.id}>
+                      <div>
+                        <strong>{item.name}</strong>
+                        <div className="log-meta">ID: {item.id} · 数值越小优先级越高</div>
+                      </div>
+                      <input
+                        type="number"
+                        value={item.priority}
+                        onChange={(e) => updateStrategyPriority(item.id, e.target.value, index)}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                <div className="row-actions">
+                  <button disabled={busy}>保存策略</button>
+                  <button type="button" className="ghost" disabled={busy} onClick={previewStrategyConfig}>
+                    预览结果
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="muted">策略配置加载中…</p>
+            )}
+
+            {strategyPreview && (
+              <div className="strategy-preview-block">
+                <div className="strategy-summary">
+                  <div className="strategy-metric">
+                    <span>来源数</span>
+                    <strong>{strategyPreview.summary?.source_count ?? 0}</strong>
+                  </div>
+                  <div className="strategy-metric">
+                    <span>输入节点</span>
+                    <strong>{strategyPreview.summary?.input_nodes ?? 0}</strong>
+                  </div>
+                  <div className="strategy-metric">
+                    <span>输出节点</span>
+                    <strong>{strategyPreview.summary?.output_nodes ?? 0}</strong>
+                  </div>
+                  <div className="strategy-metric">
+                    <span>去重数量</span>
+                    <strong>{strategyPreview.summary?.deduped_nodes ?? 0}</strong>
+                  </div>
+                  <div className="strategy-metric">
+                    <span>重命名数量</span>
+                    <strong>{strategyPreview.summary?.renamed_nodes ?? 0}</strong>
+                  </div>
+                  <div className="strategy-metric">
+                    <span>丢弃数量</span>
+                    <strong>{strategyPreview.summary?.dropped_nodes ?? 0}</strong>
+                  </div>
+                </div>
+
+                <div className="strategy-columns">
+                  <article className="log-card">
+                    <h4>冲突处理</h4>
+                    {strategyPreview.conflicts?.length > 0 ? (
+                      <div className="log-list">
+                        {strategyPreview.conflicts.map((item, index) => (
+                          <div className="log-card" key={`${item.name}-${index}`}>
+                            <strong>{item.name}</strong>
+                            <div className="log-meta">处理方式：{item.resolution}</div>
+                            {item.winner_source && <div className="log-meta">胜出来源：{item.winner_source}</div>}
+                            {item.dropped_sources?.length > 0 && (
+                              <div className="log-detail">丢弃来源：{item.dropped_sources.join('、')}</div>
+                            )}
+                            {item.renamed_sources?.length > 0 && (
+                              <div className="log-detail">重命名来源：{item.renamed_sources.join('、')}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="muted">当前预览没有命名冲突。</p>
+                    )}
+                  </article>
+
+                  <article className="log-card">
+                    <h4>输出预览</h4>
+                    {strategyPreview.preview_nodes?.length > 0 ? (
+                      <ol className="strategy-list">
+                        {strategyPreview.preview_nodes.map((item, index) => (
+                          <li key={`${item}-${index}`}>{item}</li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="muted">暂无可输出节点。</p>
+                    )}
+                  </article>
+                </div>
+              </div>
+            )}
+          </div>
 
           <h3>修改密码</h3>
           <form className="grid-form" onSubmit={changePassword}>
