@@ -95,7 +95,7 @@ make logs SERVICE=api
 
 ## 高级同步策略
 
-- 管理后台已提供“高级同步策略”配置区，可设置策略模式、手动节点优先级、上游优先级并查看 preview 摘要
+- 管理后台已提供“高级同步策略”配置区，可设置策略模式、手动节点优先级、上游优先级并查看 preview 摘要；同时支持保存成功提示、preview 过期提示、未保存变更提醒与 `priority_override` 风险提示
 - API 已提供：`GET /api/strategy`、`PUT /api/strategy`、`POST /api/strategy/preview`
 - 当前支持的策略模式：`merge_dedupe`、`priority_override`、`keep_both_rename`
 - preview 基于当前缓存上游与启用手动节点计算，不会触发同步或写入输出
