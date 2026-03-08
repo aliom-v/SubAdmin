@@ -105,6 +105,7 @@ make logs SERVICE=api
 ## 文档导航
 
 - 状态摘要：`docs/STATUS.md`
+- 最近优化摘要：`docs/RECENT_OPTIMIZATIONS.md`
 - 遗留问题与优化清单：`docs/OPEN_ISSUES.md`
 - 高级同步策略设计与实现状态：`docs/ADVANCED_SYNC_STRATEGY.md`
 - 策略上线与回滚：`docs/STRATEGY_ROLLOUT.md`
