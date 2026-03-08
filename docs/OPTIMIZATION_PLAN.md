@@ -1,6 +1,6 @@
 # SubAdmin 优化实施计划（完整版）
 
-更新时间：2026-03-02（Phase 4 收尾资产补齐）
+更新时间：2026-03-08（清理模板文档与引用）
 
 ## 1. 文档定位
 
@@ -146,9 +146,9 @@
 任务：
 
 1. 进行端到端回归与故障演练（限流、上游超时、缓存命中）。
-2. 执行 `./scripts/phase4_pressure_sample.sh` 并归档 `docs/PHASE4_PRESSURE_REVIEW.md`。
-3. 归档 CI 首次远端运行证据到 `docs/CI_FIRST_RUN_EVIDENCE.md`。
-4. 更新 `docs/STATUS.md` 的状态矩阵与变更记录。
+2. 执行 `./scripts/phase4_pressure_sample.sh` 并保留 `data/reports/` 下的报告产物。
+3. 记录 CI 首次远端运行的关键结论并更新 `docs/STATUS.md`。
+4. 按需补充发布记录或外部留痕。
 5. 形成首轮优化复盘与下一轮计划输入。
 
 ## 7. 详细任务拆解（按优化项）
@@ -388,7 +388,7 @@
 | 2026-03-02 | O8 | 新增 `.github/workflows/ci.yml`（后端测试+前端构建+Docker 冒烟） | 本地无法触发 GitHub Actions，需远端首跑留痕 | 进入 Phase 4 收尾验收 | 待填 |
 | 2026-03-02 | Phase 4 | 新增 `scripts/phase4_acceptance.sh`，覆盖健康、登录、ETag/304、备份、限流锁定、同步重试与结构化日志回归 | 脚本依赖 Docker 可用与默认管理员密码 | 执行脚本并固化验收记录 | 待填 |
 | 2026-03-02 | Phase 4 验收执行 | 执行 `./scripts/phase4_acceptance.sh` 全量通过（含 429 锁定、`sync_upstream_retry` 与结构化日志字段校验） | 无 | 归档执行日志并进入压测抽检 | 待填 |
-| 2026-03-02 | Phase 4 收尾资产 | 新增压测抽检脚本、压测复盘模板、CI 首跑留痕模板，并为 workflow 增加证据产物上传 | 本地无法触发远端 CI，压测脚本未在当前环境执行 | 触发首轮远端 CI 与本地压测并回填报告 | 待填 |
+| 2026-03-02 | Phase 4 收尾资产 | 新增压测抽检脚本与 CI 证据产物上传 | 本地无法触发远端 CI，压测脚本未在当前环境执行 | 触发首轮远端 CI 与本地压测并保留报告产物 | 待填 |
 
 ### 12.2 变更记录模板
 
@@ -403,7 +403,7 @@
 | 2026-03-02 | O8 代码落地 | 代码 | .github/workflows/ci.yml | workflow 语法静态检查通过（待远端执行） | 完成 CI 门禁定义与冒烟脚本 |
 | 2026-03-02 | Phase 4 回归脚本 | 代码 | scripts/phase4_acceptance.sh/README | 本地脚本执行通过（含故障演练） | 形成可复用收尾验收入口 |
 | 2026-03-02 | Phase 4 回归执行留痕 | 验收 | scripts/phase4_acceptance.sh/docs/OPTIMIZATION_PLAN.md/docs/STATUS.md | `./scripts/phase4_acceptance.sh` 在 Docker 环境全量通过（执行时间：2026-03-02 14:18 +08:00） | 修正系统日志断言为兼容转义 JSON 字符串匹配 |
-| 2026-03-02 | Phase 4 收尾资产补齐 | 代码/文档 | scripts/phase4_pressure_sample.sh/.github/workflows/ci.yml/README/docs | 本地完成脚本与 workflow 静态校验（远端执行待补） | 新增压测抽检入口、CI 证据产物与两份留痕模板 |
+| 2026-03-02 | Phase 4 收尾资产补齐 | 代码/文档 | scripts/phase4_pressure_sample.sh/.github/workflows/ci.yml/README/docs | 本地完成脚本与 workflow 静态校验（远端执行待补） | 新增压测抽检入口与 CI 证据产物上传 |
 
 ## 13. 里程碑验收点
 
@@ -423,5 +423,5 @@
 ## 15. 当前结论
 
 - O1~O8 已完成首轮代码落地，Phase 4 回归脚本已执行通过。
-- Phase 4 收尾所需脚本、文档模板与 CI 证据上传已补齐。
-- 下一步聚焦真实执行并回填：CI 首次远端运行留痕、Phase 4 压测抽检与复盘输出。
+- Phase 4 收尾所需脚本与 CI 证据上传已补齐。
+- 下一步聚焦真实执行并保留结果：CI 首次远端运行结论与 Phase 4 压测报告产物。
