@@ -142,3 +142,4 @@
 - 指标与监控：`docs/METRICS.md`
 - 策略设计与实现状态：`docs/ADVANCED_SYNC_STRATEGY.md`
 - 回归与验收记录：`docs/PHASE4_REGRESSION.md`
+- 管理后台与策略交互指南：`docs/ADMIN_CONSOLE.md`

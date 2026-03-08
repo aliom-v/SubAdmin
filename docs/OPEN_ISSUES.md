@@ -41,6 +41,7 @@
 - `README.md`
 - `docs/STATUS.md`
 - `docs/RECENT_OPTIMIZATIONS.md`
+- `docs/ADMIN_CONSOLE.md`
 - `docs/ADVANCED_SYNC_STRATEGY.md`
 - `docs/STRATEGY_ROLLOUT.md`
 - `docs/PHASE4_REGRESSION.md`
@@ -146,5 +147,6 @@
 
 - 想看当前项目总体状态：看 `docs/STATUS.md`
 - 想看最近两轮已完成的优化整理：看 `docs/RECENT_OPTIMIZATIONS.md`
+- 想看管理后台结构与策略交互说明：看 `docs/ADMIN_CONSOLE.md`
 - 想看高级同步策略设计与现状：看 `docs/ADVANCED_SYNC_STRATEGY.md`
 - 想看本轮仍未完成的问题：看本文档

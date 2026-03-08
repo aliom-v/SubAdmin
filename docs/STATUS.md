@@ -11,6 +11,7 @@
 - Phase 4 回归与验收记录见 `docs/PHASE4_REGRESSION.md`。
 - 当前指标与监控说明见 `docs/METRICS.md`。
 - 最近两轮高价值优化摘要见 `docs/RECENT_OPTIMIZATIONS.md`。
+- 管理后台页面结构与策略 UX 交互说明见 `docs/ADMIN_CONSOLE.md`。
 
 ## 2. 当前结论
 

@@ -87,6 +87,25 @@ TOTAL_REQUESTS=500 CONCURRENCY=50 START_STACK=false make pressure
 - `data/reports/phase4-pressure-<timestamp>/*.raw.txt`
 - `data/reports/phase4-pressure-<timestamp>/*.latency.txt`
 
+### 3.3 CI 证据入口
+
+当前 GitHub Actions 工作流已配置三类 artifact：
+
+- `ci-evidence-backend`
+- `ci-evidence-frontend`
+- `ci-evidence-smoke`
+
+建议关注内容：
+
+- `ci-evidence-backend`：`go-test.log`、`go-vet.log`、`durations.env`
+- `ci-evidence-frontend`：`npm-ci.log`、`npm-build.log`、`durations.env`
+- `ci-evidence-smoke`：`docker-compose-up-attempt-*.log`、`healthz.json`、`login.json`、`metrics.txt`、`output-statuses.txt`、`smoke.meta`
+
+当前状态：
+
+- workflow 与 artifact 上传规则已经配置完成。
+- 本文档尚待首次远端执行后回填具体运行时间、结果与 artifact 名称。
+
 ## 4. 已归档结果
 
 ### 4.1 已知通过记录
@@ -105,6 +124,7 @@ TOTAL_REQUESTS=500 CONCURRENCY=50 START_STACK=false make pressure
 
 - 扩展到策略接口与策略日志断言后的最新脚本，已在本地 Docker 环境重新执行并通过。
 - 当前已具备新的本地通过基线；后续只需在 CI / 远端环境补充对应 artifact 与远端记录即可。
+- 当前 CI artifact 的命名与日志落点已经固定，后续补证据时无需再重新设计归档结构。
 
 ## 5. 回填建议
 
