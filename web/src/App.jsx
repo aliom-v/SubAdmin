@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiRequest, login, logout } from './api'
+import AppHeader from './components/AppHeader'
+import AuthView from './components/AuthView'
+import BackupTab from './components/BackupTab'
+import LogsTab from './components/LogsTab'
+import NodesTab from './components/NodesTab'
+import SettingsTab from './components/SettingsTab'
+import TabNav from './components/TabNav'
+import UpstreamsTab from './components/UpstreamsTab'
 
 const TABS = [
   { id: 'upstreams', label: '上游订阅' },
@@ -121,12 +129,13 @@ function App() {
     boot()
   }, [])
 
-  const statusSummary = useMemo(() => {
-    return {
+  const statusSummary = useMemo(
+    () => ({
       upstreamEnabled: upstreams.filter((item) => item.enabled).length,
       nodeEnabled: nodes.filter((item) => item.enabled).length
-    }
-  }, [upstreams, nodes])
+    }),
+    [upstreams, nodes]
+  )
 
   const activeStrategyMode =
     STRATEGY_MODES.find((item) => item.id === strategy?.strategy_mode) || STRATEGY_MODES[0]
@@ -256,6 +265,42 @@ function App() {
       setRawUpstreamID(upstreams[0].id)
     }
   }, [upstreams, rawUpstreamID])
+
+  function updateLoginFormField(key, value) {
+    setLoginForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateUpstreamFormField(key, value) {
+    setUpstreamForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateUpstreamField(id, key, value) {
+    setUpstreams((prev) => prev.map((item) => (item.id === id ? { ...item, [key]: value } : item)))
+  }
+
+  function updateNodeFormField(key, value) {
+    setNodeForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateNodeField(id, key, value) {
+    setNodes((prev) => prev.map((item) => (item.id === id ? { ...item, [key]: value } : item)))
+  }
+
+  function updateSettingsField(key, value) {
+    setSettings((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updatePasswordFormField(key, value) {
+    setPasswordForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateTokenFormField(key, value) {
+    setTokenForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function updateLogLimit(value) {
+    setLogLimit(Math.min(500, Math.max(10, Number(value) || 80)))
+  }
 
   async function createUpstream(event) {
     event.preventDefault()
@@ -698,699 +743,132 @@ function App() {
     return date.toLocaleString()
   }
 
+  function renderActiveTab() {
+    switch (activeTab) {
+      case 'upstreams':
+        return (
+          <UpstreamsTab
+            busy={busy}
+            upstreamForm={upstreamForm}
+            onUpstreamFormChange={updateUpstreamFormField}
+            onCreateUpstream={createUpstream}
+            upstreams={upstreams}
+            onUpstreamFieldChange={updateUpstreamField}
+            onSyncUpstream={syncUpstream}
+            onUpdateUpstream={updateUpstream}
+            onDeleteUpstream={deleteUpstream}
+            rawUpstreamID={rawUpstreamID}
+            onRawUpstreamChange={setRawUpstreamID}
+            onLoadRawContent={() => loadRawContent()}
+            onPreviewRawContent={previewRawContent}
+            onSaveRawContent={saveRawContent}
+            rawContent={rawContent}
+            onRawContentChange={setRawContent}
+            rawPreview={rawPreview}
+            rawLastStatus={rawLastStatus}
+          />
+        )
+      case 'nodes':
+        return (
+          <NodesTab
+            busy={busy}
+            nodeForm={nodeForm}
+            onNodeFormChange={updateNodeFormField}
+            onCreateNode={createNode}
+            nodes={nodes}
+            onNodeFieldChange={updateNodeField}
+            onUpdateNode={updateNode}
+            onDeleteNode={deleteNode}
+          />
+        )
+      case 'settings':
+        return settings ? (
+          <SettingsTab
+            settings={settings}
+            busy={busy}
+            onSaveSettings={saveSettings}
+            onSettingsFieldChange={updateSettingsField}
+            strategy={strategy}
+            strategyModes={STRATEGY_MODES}
+            activeStrategyMode={activeStrategyMode}
+            onSaveStrategy={saveStrategy}
+            onPreviewStrategy={previewStrategyConfig}
+            onStrategyFieldChange={updateStrategyField}
+            onStrategyPriorityChange={updateStrategyPriority}
+            strategyPreview={strategyPreview}
+            passwordForm={passwordForm}
+            onPasswordFormChange={updatePasswordFormField}
+            onChangePassword={changePassword}
+            tokenForm={tokenForm}
+            onTokenFormChange={updateTokenFormField}
+            onCreateToken={createToken}
+            newTokenValue={newTokenValue}
+            tokens={tokens}
+            onRevokeToken={revokeToken}
+            formatTime={formatTime}
+          />
+        ) : (
+          <section className="panel">
+            <h2>系统设置</h2>
+            <p className="muted">设置加载中…</p>
+          </section>
+        )
+      case 'backup':
+        return (
+          <BackupTab
+            busy={busy}
+            onExportBackup={exportBackup}
+            onExportSQLiteBackup={exportSQLiteBackup}
+            snapshotKind={snapshotKind}
+            onSnapshotKindChange={setSnapshotKind}
+            onRefreshSnapshots={() => fetchSnapshots()}
+            snapshots={snapshots}
+            onRollbackSnapshot={rollbackSnapshot}
+            formatTime={formatTime}
+            backupJSON={backupJSON}
+            onBackupJSONChange={setBackupJSON}
+            onImportBackup={importBackup}
+          />
+        )
+      case 'logs':
+        return (
+          <LogsTab
+            busy={busy}
+            logLimit={logLimit}
+            onLogLimitChange={updateLogLimit}
+            onRefreshLogs={refreshLogs}
+            syncLogs={syncLogs}
+            systemLogs={systemLogs}
+            formatTime={formatTime}
+          />
+        )
+      default:
+        return null
+    }
+  }
+
   if (booting) {
     return <div className="center">初始化中...</div>
   }
 
   if (!authed) {
     return (
-      <main className="auth-wrap">
-        <section className="auth-card">
-          <h1>SubAdmin</h1>
-          <p>个人订阅管理中心</p>
-          <form onSubmit={handleLogin}>
-            <label>
-              用户名
-              <input
-                value={loginForm.username}
-                onChange={(e) => setLoginForm((prev) => ({ ...prev, username: e.target.value }))}
-                required
-              />
-            </label>
-            <label>
-              密码
-              <input
-                type="password"
-                value={loginForm.password}
-                onChange={(e) => setLoginForm((prev) => ({ ...prev, password: e.target.value }))}
-                required
-              />
-            </label>
-            <button disabled={busy} type="submit">
-              登录
-            </button>
-          </form>
-          {error && <div className="error-box">{error}</div>}
-        </section>
-      </main>
+      <AuthView
+        loginForm={loginForm}
+        onFieldChange={updateLoginFormField}
+        onSubmit={handleLogin}
+        busy={busy}
+        error={error}
+      />
     )
   }
 
   return (
     <main className="layout">
-      <header className="topbar">
-        <div>
-          <h1>SubAdmin 控制台</h1>
-          <p>
-            管理员：{admin?.username || 'unknown'} | 已启用上游 {statusSummary.upstreamEnabled} 个，手动节点{' '}
-            {statusSummary.nodeEnabled} 个
-          </p>
-        </div>
-        <div className="actions">
-          <button onClick={syncAll} disabled={busy}>
-            全量同步
-          </button>
-          <button onClick={handleLogout} disabled={busy} className="ghost">
-            退出
-          </button>
-        </div>
-      </header>
-
-      <nav className="tabs">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            className={tab.id === activeTab ? 'active' : ''}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
-
+      <AppHeader admin={admin} statusSummary={statusSummary} busy={busy} onSyncAll={syncAll} onLogout={handleLogout} />
+      <TabNav tabs={TABS} activeTab={activeTab} onChange={setActiveTab} />
       {error && <div className="error-box">{error}</div>}
-
-      {activeTab === 'upstreams' && (
-        <section className="panel">
-          <h2>上游订阅管理</h2>
-          <form className="grid-form" onSubmit={createUpstream}>
-            <input
-              placeholder="名称"
-              value={upstreamForm.name}
-              onChange={(e) => setUpstreamForm((prev) => ({ ...prev, name: e.target.value }))}
-            />
-            <input
-              placeholder="订阅 URL"
-              value={upstreamForm.url}
-              onChange={(e) => setUpstreamForm((prev) => ({ ...prev, url: e.target.value }))}
-            />
-            <input
-              type="number"
-              min="1"
-              placeholder="同步间隔(分钟)"
-              value={upstreamForm.refresh_interval}
-              onChange={(e) =>
-                setUpstreamForm((prev) => ({ ...prev, refresh_interval: Number(e.target.value) || 60 }))
-              }
-            />
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={upstreamForm.enabled}
-                onChange={(e) => setUpstreamForm((prev) => ({ ...prev, enabled: e.target.checked }))}
-              />
-              启用
-            </label>
-            <button disabled={busy}>新增上游</button>
-          </form>
-
-          <div className="list-wrap">
-            {upstreams.map((item) => (
-              <article className="list-row" key={item.id}>
-                <input
-                  value={item.name}
-                  onChange={(e) =>
-                    setUpstreams((prev) =>
-                      prev.map((u) => (u.id === item.id ? { ...u, name: e.target.value } : u))
-                    )
-                  }
-                />
-                <input
-                  value={item.url}
-                  onChange={(e) =>
-                    setUpstreams((prev) =>
-                      prev.map((u) => (u.id === item.id ? { ...u, url: e.target.value } : u))
-                    )
-                  }
-                />
-                <input
-                  type="number"
-                  value={item.refresh_interval}
-                  onChange={(e) =>
-                    setUpstreams((prev) =>
-                      prev.map((u) =>
-                        u.id === item.id ? { ...u, refresh_interval: Number(e.target.value) || 60 } : u
-                      )
-                    )
-                  }
-                />
-                <label className="inline-check">
-                  <input
-                    type="checkbox"
-                    checked={item.enabled}
-                    onChange={(e) =>
-                      setUpstreams((prev) =>
-                        prev.map((u) => (u.id === item.id ? { ...u, enabled: e.target.checked } : u))
-                      )
-                    }
-                  />
-                  启用
-                </label>
-                <small>{item.last_status || '未同步'}</small>
-                <div className="row-actions">
-                  <button onClick={() => syncUpstream(item.id)} disabled={busy}>
-                    同步
-                  </button>
-                  <button onClick={() => updateUpstream(item)} disabled={busy}>
-                    保存
-                  </button>
-                  <button onClick={() => deleteUpstream(item.id)} disabled={busy} className="danger">
-                    删除
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          <div className="raw-editor">
-            <h3>原始订阅内容预览 / 粘贴编辑</h3>
-            <p className="muted">支持整段 URI 列表或 base64 订阅文本。保存后会写入该上游缓存。</p>
-            <div className="raw-toolbar">
-              <label className="inline-field">
-                目标上游
-                <select
-                  value={rawUpstreamID || ''}
-                  onChange={(e) => setRawUpstreamID(Number(e.target.value) || 0)}
-                >
-                  {upstreams.length === 0 && <option value="">暂无上游</option>}
-                  {upstreams.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      #{item.id} {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button onClick={() => loadRawContent()} disabled={busy || !rawUpstreamID} className="ghost">
-                加载当前缓存
-              </button>
-              <button onClick={previewRawContent} disabled={busy || !rawUpstreamID}>
-                预览解析
-              </button>
-              <button onClick={saveRawContent} disabled={busy || !rawUpstreamID}>
-                保存为缓存
-              </button>
-            </div>
-            <label>
-              粘贴订阅原文（URI/base64）
-              <textarea
-                rows="10"
-                value={rawContent}
-                onChange={(e) => setRawContent(e.target.value)}
-                placeholder="在这里粘贴整段订阅内容"
-              />
-            </label>
-            <div className="raw-summary">
-              <span>解析节点数：{rawPreview.node_count || 0}</span>
-              <span>上游状态：{rawLastStatus || '未设置'}</span>
-            </div>
-            {rawPreview.preview_nodes.length > 0 && (
-              <div className="raw-preview-wrap">
-                <strong>预览（最多 30 条）</strong>
-                <pre className="raw-preview">{rawPreview.preview_nodes.join('\n')}</pre>
-                {rawPreview.truncated && <small className="muted">结果较长，仅显示前 30 条。</small>}
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-
-      {activeTab === 'nodes' && (
-        <section className="panel">
-          <h2>手动节点管理</h2>
-          <form className="grid-form" onSubmit={createNode}>
-            <input
-              placeholder="名称"
-              value={nodeForm.name}
-              onChange={(e) => setNodeForm((prev) => ({ ...prev, name: e.target.value }))}
-            />
-            <input
-              placeholder="节点 URI"
-              value={nodeForm.raw_uri}
-              onChange={(e) => setNodeForm((prev) => ({ ...prev, raw_uri: e.target.value }))}
-            />
-            <input
-              placeholder="分组"
-              value={nodeForm.group_name}
-              onChange={(e) => setNodeForm((prev) => ({ ...prev, group_name: e.target.value }))}
-            />
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={nodeForm.enabled}
-                onChange={(e) => setNodeForm((prev) => ({ ...prev, enabled: e.target.checked }))}
-              />
-              启用
-            </label>
-            <button disabled={busy}>新增节点</button>
-          </form>
-
-          <div className="list-wrap">
-            {nodes.map((item) => (
-              <article className="list-row" key={item.id}>
-                <input
-                  value={item.name}
-                  onChange={(e) =>
-                    setNodes((prev) => prev.map((u) => (u.id === item.id ? { ...u, name: e.target.value } : u)))
-                  }
-                />
-                <input
-                  value={item.raw_uri}
-                  onChange={(e) =>
-                    setNodes((prev) =>
-                      prev.map((u) => (u.id === item.id ? { ...u, raw_uri: e.target.value } : u))
-                    )
-                  }
-                />
-                <input
-                  value={item.group_name}
-                  onChange={(e) =>
-                    setNodes((prev) =>
-                      prev.map((u) => (u.id === item.id ? { ...u, group_name: e.target.value } : u))
-                    )
-                  }
-                />
-                <label className="inline-check">
-                  <input
-                    type="checkbox"
-                    checked={item.enabled}
-                    onChange={(e) =>
-                      setNodes((prev) =>
-                        prev.map((u) => (u.id === item.id ? { ...u, enabled: e.target.checked } : u))
-                      )
-                    }
-                  />
-                  启用
-                </label>
-                <div className="row-actions">
-                  <button onClick={() => updateNode(item)} disabled={busy}>
-                    保存
-                  </button>
-                  <button onClick={() => deleteNode(item.id)} disabled={busy} className="danger">
-                    删除
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {activeTab === 'settings' && settings && (
-        <section className="panel">
-          <h2>系统设置</h2>
-          <form className="settings" onSubmit={saveSettings}>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={settings.cache_mode}
-                onChange={(e) => setSettings((prev) => ({ ...prev, cache_mode: e.target.checked }))}
-              />
-              缓存模式（推荐）
-            </label>
-            <label>
-              缓存刷新间隔（分钟）
-              <input
-                type="number"
-                min="1"
-                value={settings.cache_interval}
-                onChange={(e) =>
-                  setSettings((prev) => ({ ...prev, cache_interval: Number(e.target.value) || 10 }))
-                }
-              />
-            </label>
-            <label>
-              输出模板
-              <input
-                value={settings.output_template}
-                onChange={(e) => setSettings((prev) => ({ ...prev, output_template: e.target.value }))}
-              />
-            </label>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={Boolean(settings.auto_backup_enabled)}
-                onChange={(e) => setSettings((prev) => ({ ...prev, auto_backup_enabled: e.target.checked }))}
-              />
-              启用自动备份
-            </label>
-            <label>
-              自动备份间隔（小时）
-              <input
-                type="number"
-                min="1"
-                value={settings.auto_backup_interval_hours ?? 24}
-                onChange={(e) =>
-                  setSettings((prev) => ({ ...prev, auto_backup_interval_hours: Number(e.target.value) || 24 }))
-                }
-              />
-            </label>
-            <label>
-              备份保留份数
-              <input
-                type="number"
-                min="1"
-                value={settings.auto_backup_keep ?? 7}
-                onChange={(e) =>
-                  setSettings((prev) => ({ ...prev, auto_backup_keep: Number(e.target.value) || 7 }))
-                }
-              />
-            </label>
-            <button disabled={busy}>保存设置</button>
-          </form>
-
-          <div className="section-block strategy-panel">
-            <div>
-              <h3>高级同步策略</h3>
-              <p className="strategy-note">
-                对 `/clash` 与 `/singbox` 聚合输出生效。预览基于当前缓存上游和已启用手动节点，不会触发同步。
-              </p>
-            </div>
-
-            {strategy ? (
-              <form className="settings" onSubmit={saveStrategy}>
-                <div className="strategy-grid">
-                  <label>
-                    策略模式
-                    <select
-                      value={strategy.strategy_mode}
-                      onChange={(e) => updateStrategyField('strategy_mode', e.target.value)}
-                    >
-                      {STRATEGY_MODES.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    手动节点优先级
-                    <input
-                      type="number"
-                      value={strategy.manual_nodes_priority}
-                      onChange={(e) => updateStrategyField('manual_nodes_priority', Number(e.target.value) || 0)}
-                    />
-                  </label>
-                  <label>
-                    重命名后缀模板
-                    <input
-                      value={strategy.rename_suffix_format}
-                      placeholder="[{source}]"
-                      onChange={(e) => updateStrategyField('rename_suffix_format', e.target.value)}
-                    />
-                  </label>
-                </div>
-
-                <div className="log-meta">{activeStrategyMode.description}</div>
-
-                <div className="strategy-priority-list">
-                  <strong>上游优先级</strong>
-                  {strategy.upstreams.length === 0 && <p className="muted">暂无上游，当前仅手动节点参与聚合。</p>}
-                  {strategy.upstreams.map((item, index) => (
-                    <div className="strategy-priority-row" key={item.id}>
-                      <div>
-                        <strong>{item.name}</strong>
-                        <div className="log-meta">ID: {item.id} · 数值越小优先级越高</div>
-                      </div>
-                      <input
-                        type="number"
-                        value={item.priority}
-                        onChange={(e) => updateStrategyPriority(item.id, e.target.value, index)}
-                      />
-                    </div>
-                  ))}
-                </div>
-
-                <div className="row-actions">
-                  <button disabled={busy}>保存策略</button>
-                  <button type="button" className="ghost" disabled={busy} onClick={previewStrategyConfig}>
-                    预览结果
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <p className="muted">策略配置加载中…</p>
-            )}
-
-            {strategyPreview && (
-              <div className="strategy-preview-block">
-                <div className="strategy-summary">
-                  <div className="strategy-metric">
-                    <span>来源数</span>
-                    <strong>{strategyPreview.summary?.source_count ?? 0}</strong>
-                  </div>
-                  <div className="strategy-metric">
-                    <span>输入节点</span>
-                    <strong>{strategyPreview.summary?.input_nodes ?? 0}</strong>
-                  </div>
-                  <div className="strategy-metric">
-                    <span>输出节点</span>
-                    <strong>{strategyPreview.summary?.output_nodes ?? 0}</strong>
-                  </div>
-                  <div className="strategy-metric">
-                    <span>去重数量</span>
-                    <strong>{strategyPreview.summary?.deduped_nodes ?? 0}</strong>
-                  </div>
-                  <div className="strategy-metric">
-                    <span>重命名数量</span>
-                    <strong>{strategyPreview.summary?.renamed_nodes ?? 0}</strong>
-                  </div>
-                  <div className="strategy-metric">
-                    <span>丢弃数量</span>
-                    <strong>{strategyPreview.summary?.dropped_nodes ?? 0}</strong>
-                  </div>
-                </div>
-
-                <div className="strategy-columns">
-                  <article className="log-card">
-                    <h4>冲突处理</h4>
-                    {strategyPreview.conflicts?.length > 0 ? (
-                      <div className="log-list">
-                        {strategyPreview.conflicts.map((item, index) => (
-                          <div className="log-card" key={`${item.name}-${index}`}>
-                            <strong>{item.name}</strong>
-                            <div className="log-meta">处理方式：{item.resolution}</div>
-                            {item.winner_source && <div className="log-meta">胜出来源：{item.winner_source}</div>}
-                            {item.dropped_sources?.length > 0 && (
-                              <div className="log-detail">丢弃来源：{item.dropped_sources.join('、')}</div>
-                            )}
-                            {item.renamed_sources?.length > 0 && (
-                              <div className="log-detail">重命名来源：{item.renamed_sources.join('、')}</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="muted">当前预览没有命名冲突。</p>
-                    )}
-                  </article>
-
-                  <article className="log-card">
-                    <h4>输出预览</h4>
-                    {strategyPreview.preview_nodes?.length > 0 ? (
-                      <ol className="strategy-list">
-                        {strategyPreview.preview_nodes.map((item, index) => (
-                          <li key={`${item}-${index}`}>{item}</li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <p className="muted">暂无可输出节点。</p>
-                    )}
-                  </article>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <h3>修改密码</h3>
-          <form className="grid-form" onSubmit={changePassword}>
-            <input
-              type="password"
-              placeholder="旧密码"
-              value={passwordForm.old_password}
-              onChange={(e) => setPasswordForm((prev) => ({ ...prev, old_password: e.target.value }))}
-            />
-            <input
-              type="password"
-              placeholder="新密码（至少6位）"
-              value={passwordForm.new_password}
-              onChange={(e) => setPasswordForm((prev) => ({ ...prev, new_password: e.target.value }))}
-            />
-            <button disabled={busy}>更新密码</button>
-          </form>
-
-          <h3>多 Token 访问控制</h3>
-          <form className="grid-form" onSubmit={createToken}>
-            <input
-              placeholder="Token 名称（如：脚本机）"
-              value={tokenForm.name}
-              onChange={(e) => setTokenForm((prev) => ({ ...prev, name: e.target.value }))}
-            />
-            <input
-              type="number"
-              min="1"
-              placeholder="有效期小时"
-              value={tokenForm.hours}
-              onChange={(e) => setTokenForm((prev) => ({ ...prev, hours: Number(e.target.value) || 720 }))}
-            />
-            <button disabled={busy}>创建 Token</button>
-          </form>
-          {newTokenValue && (
-            <label>
-              新 Token（仅本次展示）
-              <textarea rows="3" value={newTokenValue} readOnly />
-            </label>
-          )}
-          <div className="list-wrap">
-            {tokens.length === 0 && <p className="muted">暂无 token</p>}
-            {tokens.map((item) => (
-              <article className="token-row" key={item.id}>
-                <div>
-                  <strong>{item.name || `Token #${item.id}`}</strong>
-                  <div className="log-meta">
-                    到期：{formatTime(item.expires_at)} | 最近使用：{formatTime(item.last_used_at)} | 状态：
-                    {item.enabled ? '启用' : '已禁用'} {item.is_current ? '(当前会话)' : ''}
-                  </div>
-                </div>
-                <div className="row-actions">
-                  <button
-                    onClick={() => revokeToken(item.id)}
-                    disabled={busy || !item.enabled}
-                    className="danger"
-                  >
-                    吊销
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {activeTab === 'backup' && (
-        <section className="panel">
-          <h2>备份恢复</h2>
-          <div className="row-actions">
-            <button disabled={busy} onClick={exportBackup}>
-              导出 JSON 备份
-            </button>
-            <button disabled={busy} onClick={exportSQLiteBackup} className="ghost">
-              导出 SQLite
-            </button>
-          </div>
-          <div className="snapshot-panel">
-            <div className="snapshot-toolbar">
-              <label className="inline-field">
-                快照类型
-                <select value={snapshotKind} onChange={(e) => setSnapshotKind(e.target.value)}>
-                  <option value="">全部</option>
-                  <option value="clash">clash</option>
-                  <option value="singbox">singbox</option>
-                </select>
-              </label>
-              <button disabled={busy} onClick={() => fetchSnapshots()} className="ghost">
-                刷新快照
-              </button>
-            </div>
-            <div className="snapshot-list">
-              {snapshots.length === 0 && <p className="muted">暂无快照记录</p>}
-              {snapshots.map((item) => (
-                <article className="snapshot-row" key={item.id}>
-                  <div>
-                    <strong>
-                      #{item.id} {item.kind}
-                    </strong>
-                    <div className="log-meta">
-                      时间：{formatTime(item.created_at)} | 内容大小：{item.content_length || 0} 字节
-                    </div>
-                    {item.note && <div className="log-detail">{item.note}</div>}
-                  </div>
-                  <div className="row-actions">
-                    <button onClick={() => rollbackSnapshot(item.id)} disabled={busy} className="danger">
-                      回滚到此快照
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </div>
-          <form onSubmit={importBackup}>
-            <label>
-              粘贴备份 JSON 后恢复
-              <textarea
-                rows="14"
-                value={backupJSON}
-                onChange={(e) => setBackupJSON(e.target.value)}
-                placeholder={`{\n  "admins": [...], ...\n}`}
-              />
-            </label>
-            <button disabled={busy}>导入恢复</button>
-          </form>
-        </section>
-      )}
-
-      {activeTab === 'logs' && (
-        <section className="panel">
-          <h2>系统日志与同步任务明细</h2>
-          <div className="row-actions log-toolbar">
-            <label className="inline-field">
-              展示条数
-              <input
-                type="number"
-                min="10"
-                max="500"
-                value={logLimit}
-                onChange={(e) => setLogLimit(Math.min(500, Math.max(10, Number(e.target.value) || 80)))}
-              />
-            </label>
-            <button disabled={busy} onClick={refreshLogs}>
-              刷新日志
-            </button>
-          </div>
-
-          <div className="logs-grid">
-            <article>
-              <h3>同步任务明细</h3>
-              <div className="log-list">
-                {syncLogs.length === 0 && <p className="muted">暂无同步记录</p>}
-                {syncLogs.map((item) => (
-                  <div className="log-card" key={`sync-${item.id}`}>
-                    <div className="log-head">
-                      <strong>
-                        #{item.upstream_id} {item.upstream_name || 'unknown'}
-                      </strong>
-                      <span className={`log-badge ${item.status}`}>{item.status}</span>
-                    </div>
-                    <div className="log-meta">
-                      来源：{item.trigger_source || '-'} | 节点数：{item.node_count} | 耗时：
-                      {item.duration_ms}ms | 时间：{formatTime(item.created_at)}
-                    </div>
-                    {item.detail && <div className="log-detail">{item.detail}</div>}
-                  </div>
-                ))}
-              </div>
-            </article>
-
-            <article>
-              <h3>系统日志</h3>
-              <div className="log-list">
-                {systemLogs.length === 0 && <p className="muted">暂无系统日志</p>}
-                {systemLogs.map((item) => (
-                  <div className="log-card" key={`system-${item.id}`}>
-                    <div className="log-head">
-                      <strong>
-                        [{item.category}] {item.action}
-                      </strong>
-                      <span className={`log-badge ${item.level}`}>{item.level}</span>
-                    </div>
-                    <div className="log-meta">时间：{formatTime(item.created_at)}</div>
-                    {item.detail && <div className="log-detail">{item.detail}</div>}
-                  </div>
-                ))}
-              </div>
-            </article>
-          </div>
-        </section>
-      )}
+      {renderActiveTab()}
     </main>
   )
 }
