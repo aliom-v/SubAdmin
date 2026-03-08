@@ -96,6 +96,7 @@ make logs SERVICE=api
 
 - 状态摘要：`docs/STATUS.md`
 - 实施归档：`docs/OPTIMIZATION_PLAN.md`
+- 高级同步策略草案：`docs/ADVANCED_SYNC_STRATEGY.md`
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
 - 前后端源码：`backend/`、`web/`
