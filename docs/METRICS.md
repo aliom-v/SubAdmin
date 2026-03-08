@@ -194,6 +194,72 @@ curl -fsS http://127.0.0.1:18080/metrics | head
 - 观察一次批量同步整体耗时
 - 辅助评估并发、重试和上游质量对总时长的影响
 
+### 3.8 策略 preview 次数
+
+指标名：`subadmin_strategy_preview_total`
+
+类型：`counter`
+
+标签：
+
+- `strategy_mode`
+
+用途：
+
+- 观察不同策略模式的预览频率
+- 判断管理员是否在频繁试算某种策略
+
+### 3.9 策略 apply 次数
+
+指标名：`subadmin_strategy_apply_total`
+
+类型：`counter`
+
+标签：
+
+- `strategy_mode`
+
+用途：
+
+- 观察策略配置实际保存次数
+- 辅助判断策略变更是否频繁
+
+### 3.10 策略冲突组数量
+
+指标名：`subadmin_strategy_conflicts_total`
+
+类型：`counter`
+
+标签：
+
+- `operation`：`preview` 或 `apply`
+- `strategy_mode`
+
+说明：
+
+- 这里统计的是冲突组数量，不是冲突节点原始总数。
+
+用途：
+
+- 观察不同模式下冲突是否集中出现
+- 对比 preview 与 apply 时的冲突规模
+
+### 3.11 策略丢弃节点数量
+
+指标名：`subadmin_strategy_dropped_nodes_total`
+
+类型：`counter`
+
+标签：
+
+- `operation`：`preview` 或 `apply`
+- `strategy_mode`
+
+用途：
+
+- 观察 `priority_override` 等模式下丢弃规模是否升高
+- 辅助判断策略切换是否导致节点结果明显收缩
+
 ## 4. 使用示例
 
 ### 4.1 看某个路由的请求量
@@ -223,13 +289,9 @@ curl -fsS http://127.0.0.1:18080/metrics | grep '^subadmin_sync_batch_duration_s
 
 ## 6. 当前限制
 
-- 当前还没有独立的策略指标。
-- 因此，`preview_strategy`、`update_strategy`、冲突数、丢弃数仍主要依赖系统日志观测，而不是 `/metrics`。
-- 后续若新增以下指标，应同步更新本文档：
-  - `subadmin_strategy_preview_total`
-  - `subadmin_strategy_apply_total`
-  - `subadmin_strategy_conflicts_total`
-  - `subadmin_strategy_dropped_nodes_total`
+- 当前策略指标仍是按 `strategy_mode` / `operation` 聚合的总量指标。
+- 还没有按上游来源、单节点类型或输出目标拆分的更细粒度策略指标。
+- 若后续新增更细粒度策略指标，应继续同步更新本文档。
 
 ## 7. 与压测抽检的关系
 

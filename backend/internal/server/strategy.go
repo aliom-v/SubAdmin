@@ -122,12 +122,39 @@ func (s *Server) handleUpdateStrategy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to save strategy")
 		return
 	}
+
+	result, err := s.evaluateStrategyFromStore(r.Context(), config)
+	if err != nil {
+		s.logger.Printf("evaluate strategy after update failed: %v", err)
+		result = strategyResult{}
+	}
+	if s.metrics != nil {
+		s.metrics.observeStrategyApply(config.StrategyMode, result.Summary)
+	}
+
+	detail := fmt.Sprintf(
+		"strategy_mode=%s manual_nodes_priority=%d rename_suffix_format=%s upstreams=%d source_count=%d input_nodes=%d output_nodes=%d deduped_nodes=%d renamed_nodes=%d dropped_nodes=%d conflict_groups=%d",
+		config.StrategyMode,
+		config.ManualNodesPriority,
+		config.RenameSuffixFormat,
+		len(config.Upstreams),
+		result.Summary.SourceCount,
+		result.Summary.InputNodes,
+		result.Summary.OutputNodes,
+		result.Summary.DedupedNodes,
+		result.Summary.RenamedNodes,
+		result.Summary.DroppedNodes,
+		result.Summary.ConflictGroups,
+	)
+	if err != nil {
+		detail += fmt.Sprintf(" summary_error=%s", err.Error())
+	}
 	s.writeSystemLog(
 		r.Context(),
 		"info",
 		"strategy",
 		"update_strategy",
-		fmt.Sprintf("strategy_mode=%s manual_nodes_priority=%d rename_suffix_format=%s upstreams=%d", config.StrategyMode, config.ManualNodesPriority, config.RenameSuffixFormat, len(config.Upstreams)),
+		detail,
 	)
 	settings, _ := s.getSettings(r.Context())
 	if settings != nil && settings.CacheMode {
@@ -142,12 +169,14 @@ func (s *Server) handlePreviewStrategy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	sources, err := s.collectStrategySourcesFromStore(r.Context(), config)
+	result, err := s.evaluateStrategyFromStore(r.Context(), config)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("collect strategy sources failed: %v", err))
 		return
 	}
-	result := applyNodeStrategy(sources, config)
+	if s.metrics != nil {
+		s.metrics.observeStrategyPreview(config.StrategyMode, result.Summary)
+	}
 	s.writeSystemLog(
 		r.Context(),
 		"info",
@@ -161,6 +190,14 @@ func (s *Server) handlePreviewStrategy(w http.ResponseWriter, r *http.Request) {
 		Conflicts:    result.Conflicts,
 		PreviewNodes: result.PreviewNodes,
 	})
+}
+
+func (s *Server) evaluateStrategyFromStore(ctx context.Context, config *StrategyConfig) (strategyResult, error) {
+	sources, err := s.collectStrategySourcesFromStore(ctx, config)
+	if err != nil {
+		return strategyResult{}, err
+	}
+	return applyNodeStrategy(sources, config), nil
 }
 
 func (s *Server) decodeStrategyRequest(ctx context.Context, r *http.Request) (*StrategyConfig, error) {

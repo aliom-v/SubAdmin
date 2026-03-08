@@ -7,7 +7,7 @@ SubAdmin 是一个面向 Clash / Sing-box 的自托管订阅管理面板。
 
 - 统一管理多个上游订阅与手动节点，并进行去重、汇总与输出
 - 提供固定订阅地址：`/clash`、`/singbox`
-- 已支持高级同步策略最小闭环：策略模式、来源优先级、冲突预览与后台配置入口
+- 已完成高级同步策略 V1 闭环：策略模式、来源优先级、冲突预览、后台配置入口、策略指标与接口级测试
 - 支持登录保护、同步重试隔离、输出 ETag/304、自动备份与快照回滚
 - 提供 `/healthz`、`/metrics`、系统日志与同步日志，便于观测与排障
 
@@ -57,7 +57,7 @@ make logs SERVICE=api
 说明：
 
 - `make verify`：完整校验（需要 Go 1.22+、Node.js 20+ 与 npm）
-- `make acceptance`：执行 Phase 4 回归脚本
+- `make acceptance`：执行 Phase 4 回归脚本；会使用临时 Docker 数据卷，避免本地 `data/` 状态污染验收结果
 - `make pressure`：执行 Phase 4 压测抽检，报告默认输出到 `data/reports/`
 - `make logs SERVICE=api`：查看指定服务最近日志；不传 `SERVICE` 时默认查看 `api web sublink`
 
@@ -91,7 +91,7 @@ make logs SERVICE=api
 
 - 上游输入应为 URI/base64 节点订阅，不是完整 `yaml/json` 配置文件
 - 容器内访问主机服务不能用 `127.0.0.1/localhost`，应使用域名或 `host.docker.internal:<port>`
-- 当前已具备高级同步策略最小闭环，但仍未覆盖更细粒度策略能力（按输出目标/按单节点规则等）
+- 当前已具备高级同步策略 V1 闭环，但仍未覆盖更细粒度策略能力（按输出目标/按单节点规则等）
 
 ## 高级同步策略
 
@@ -100,6 +100,7 @@ make logs SERVICE=api
 - 当前支持的策略模式：`merge_dedupe`、`priority_override`、`keep_both_rename`
 - preview 基于当前缓存上游与启用手动节点计算，不会触发同步或写入输出
 - 缓存模式下，保存策略后会自动刷新输出缓存；非缓存模式下可按需手动执行 `POST /api/sync`
+- `/metrics` 已接入策略相关计数器：preview 次数、apply 次数、冲突组数量、丢弃节点数量
 
 ## 文档导航
 

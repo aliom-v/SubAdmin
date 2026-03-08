@@ -55,6 +55,11 @@ type serverMetrics struct {
 
 	syncBatchRuns     map[string]uint64
 	syncBatchDuration map[string]*histogramSample
+
+	strategyPreviewRuns  map[string]uint64
+	strategyApplyRuns    map[string]uint64
+	strategyConflicts    map[string]uint64
+	strategyDroppedNodes map[string]uint64
 }
 
 func newServerMetrics() *serverMetrics {
@@ -66,6 +71,10 @@ func newServerMetrics() *serverMetrics {
 		syncUpstreamDuration: make(map[string]*histogramSample),
 		syncBatchRuns:        make(map[string]uint64),
 		syncBatchDuration:    make(map[string]*histogramSample),
+		strategyPreviewRuns:  make(map[string]uint64),
+		strategyApplyRuns:    make(map[string]uint64),
+		strategyConflicts:    make(map[string]uint64),
+		strategyDroppedNodes: make(map[string]uint64),
 	}
 }
 
@@ -117,6 +126,38 @@ func (m *serverMetrics) observeSyncBatch(trigger, status string, duration time.D
 	m.observeHistogram(m.syncBatchDuration, durationKey, syncDurationBuckets, duration.Seconds())
 }
 
+func (m *serverMetrics) observeStrategyPreview(strategyMode string, summary StrategySummary) {
+	m.observeStrategyOperation("preview", strategyMode, summary)
+}
+
+func (m *serverMetrics) observeStrategyApply(strategyMode string, summary StrategySummary) {
+	m.observeStrategyOperation("apply", strategyMode, summary)
+}
+
+func (m *serverMetrics) observeStrategyOperation(operation, strategyMode string, summary StrategySummary) {
+	operation = sanitizeMetricLabel(operation, "unknown")
+	strategyMode = sanitizeMetricLabel(strategyMode, defaultStrategyMode)
+
+	runKey := fmt.Sprintf("strategy_mode=%s", strategyMode)
+	summaryKey := fmt.Sprintf("operation=%s|strategy_mode=%s", operation, strategyMode)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch operation {
+	case "preview":
+		m.strategyPreviewRuns[runKey]++
+	case "apply":
+		m.strategyApplyRuns[runKey]++
+	}
+	if summary.ConflictGroups > 0 {
+		m.strategyConflicts[summaryKey] += uint64(summary.ConflictGroups)
+	}
+	if summary.DroppedNodes > 0 {
+		m.strategyDroppedNodes[summaryKey] += uint64(summary.DroppedNodes)
+	}
+}
+
 func (m *serverMetrics) observeHistogram(store map[string]*histogramSample, key string, buckets []float64, value float64) {
 	sample, ok := store[key]
 	if !ok {
@@ -166,6 +207,22 @@ func (m *serverMetrics) renderPrometheus() string {
 	out.WriteString("# HELP subadmin_sync_batch_duration_seconds Batch sync latency.\n")
 	out.WriteString("# TYPE subadmin_sync_batch_duration_seconds histogram\n")
 	out.WriteString(formatHistogramLines("subadmin_sync_batch_duration_seconds", m.syncBatchDuration, syncDurationBuckets))
+
+	out.WriteString("# HELP subadmin_strategy_preview_total Strategy preview executions.\n")
+	out.WriteString("# TYPE subadmin_strategy_preview_total counter\n")
+	out.WriteString(formatCounterLines("subadmin_strategy_preview_total", m.strategyPreviewRuns))
+
+	out.WriteString("# HELP subadmin_strategy_apply_total Strategy apply executions.\n")
+	out.WriteString("# TYPE subadmin_strategy_apply_total counter\n")
+	out.WriteString(formatCounterLines("subadmin_strategy_apply_total", m.strategyApplyRuns))
+
+	out.WriteString("# HELP subadmin_strategy_conflicts_total Strategy conflict groups observed.\n")
+	out.WriteString("# TYPE subadmin_strategy_conflicts_total counter\n")
+	out.WriteString(formatCounterLines("subadmin_strategy_conflicts_total", m.strategyConflicts))
+
+	out.WriteString("# HELP subadmin_strategy_dropped_nodes_total Strategy dropped nodes observed.\n")
+	out.WriteString("# TYPE subadmin_strategy_dropped_nodes_total counter\n")
+	out.WriteString(formatCounterLines("subadmin_strategy_dropped_nodes_total", m.strategyDroppedNodes))
 
 	return out.String()
 }

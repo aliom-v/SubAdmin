@@ -6,19 +6,38 @@ cd "${ROOT_DIR}"
 
 API_BASE="http://127.0.0.1:18080"
 TMP_DIR="$(mktemp -d /tmp/subadmin-phase4-XXXXXX)"
+COMPOSE_OVERRIDE_FILE="${TMP_DIR}/docker-compose.acceptance.yml"
+ENV_CREATED_FOR_ACCEPTANCE="false"
+
+cat >"${COMPOSE_OVERRIDE_FILE}" <<YAML
+services:
+  api:
+    volumes:
+      - phase4_data:/data
+volumes:
+  phase4_data:
+YAML
+
+COMPOSE_ARGS=(-f docker-compose.yml -f "${COMPOSE_OVERRIDE_FILE}")
 
 cleanup() {
-  docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+  docker compose "${COMPOSE_ARGS[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  if [[ "${ENV_CREATED_FOR_ACCEPTANCE}" == "true" ]]; then
+    rm -f .env
+  fi
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
 
 if [[ ! -f .env ]]; then
   cp .env.example .env
+  ENV_CREATED_FOR_ACCEPTANCE="true"
 fi
 
+docker compose "${COMPOSE_ARGS[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+
 echo "[phase4] start stack"
-docker compose up -d --build api web sublink >/dev/null
+docker compose "${COMPOSE_ARGS[@]}" up -d --build api web sublink >/dev/null
 
 echo "[phase4] wait /healthz"
 for _ in {1..60}; do
@@ -117,7 +136,6 @@ SYNC_CODE="$(curl -sS -o "${TMP_DIR}/sync.json" -w '%{http_code}' -X POST "${API
 [[ "${SYNC_CODE}" == "200" || "${SYNC_CODE}" == "502" ]]
 
 curl -fsS "${API_BASE}/api/logs/system?limit=200" -H "${AUTH_HEADER}" >"${TMP_DIR}/system-logs.json"
-# `detail` is a JSON string in API response, so inner keys may appear escaped.
 grep -q 'request_id' "${TMP_DIR}/system-logs.json"
 grep -q 'sync_upstream_retry' "${TMP_DIR}/system-logs.json"
 grep -q 'update_strategy' "${TMP_DIR}/system-logs.json"
