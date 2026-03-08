@@ -1,15 +1,16 @@
 # SubAdmin
 
-SubAdmin 是一个面向 Clash / Sing-box 的自托管订阅管理面板。  
+SubAdmin 是一个面向 Clash / Sing-box 的自托管订阅管理面板。
 它把多个上游订阅与手动节点统一管理，输出固定订阅地址，并提供同步日志、备份恢复与快照回滚能力。
 
-## 它解决的问题
+## 核心能力
 
-- 多个上游来源分散，难统一维护与去重
-- 客户端需要长期稳定的固定输出地址（`/clash`、`/singbox`）
-- 出问题时需要可追踪、可回滚、可恢复
+- 统一管理多个上游订阅与手动节点，并进行去重、汇总与输出
+- 提供固定订阅地址：`/clash`、`/singbox`
+- 支持登录保护、同步重试隔离、输出 ETag/304、自动备份与快照回滚
+- 提供 `/healthz`、`/metrics`、系统日志与同步日志，便于观测与排障
 
-## 一键部署（推荐）
+## 快速开始
 
 前置条件：
 
@@ -26,12 +27,14 @@ cp .env.example .env
 docker compose up -d --build api web sublink
 ```
 
-访问地址（共存模式，不占用 80/443）：
+默认访问地址（共存模式）：
 
 - 管理后台：`http://<server-ip>:18081`
 - API 健康检查：`http://<server-ip>:18080/healthz`
 - 监控指标：`http://<server-ip>:18080/metrics`
 - 固定输出：`http://<server-ip>:18081/clash`、`http://<server-ip>:18081/singbox`
+
+## 本地验证
 
 快速验收：
 
@@ -41,26 +44,16 @@ curl -fsS http://127.0.0.1:18080/metrics | head
 docker compose ps
 ```
 
-本地校验：
-
-前置条件：
-
-- 已安装 Go 1.22+
-- 已安装 Node.js 20+ 与 npm
+完整校验（需要 Go 1.22+、Node.js 20+ 与 npm）：
 
 ```bash
 ./scripts/verify.sh
 ```
 
-Phase 4 一键回归：
+回归与压测入口：
 
 ```bash
 ./scripts/phase4_acceptance.sh
-```
-
-Phase 4 压测抽检：
-
-```bash
 ./scripts/phase4_pressure_sample.sh
 ```
 
@@ -94,13 +87,14 @@ Phase 4 压测抽检：
 
 ## 使用边界
 
-- 上游输入应为 URI/base64 节点订阅，不是完整 `yaml/json` 配置文件。
-- 容器内访问主机服务不能用 `127.0.0.1/localhost`，应使用域名或 `host.docker.internal:<port>`。
+- 上游输入应为 URI/base64 节点订阅，不是完整 `yaml/json` 配置文件
+- 容器内访问主机服务不能用 `127.0.0.1/localhost`，应使用域名或 `host.docker.internal:<port>`
+- 当前未覆盖高级同步策略（覆盖/合并/冲突处理）的完整产品化能力
 
 ## 文档导航
 
-- 实施归档（Archive）：`docs/OPTIMIZATION_PLAN.md`
-- 状态摘要（Status）：`docs/STATUS.md`
+- 状态摘要：`docs/STATUS.md`
+- 实施归档：`docs/OPTIMIZATION_PLAN.md`
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
 - 前后端源码：`backend/`、`web/`
