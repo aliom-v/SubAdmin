@@ -7,8 +7,14 @@ export default function StrategyPanel({
   onPreviewStrategy,
   onStrategyFieldChange,
   onStrategyPriorityChange,
-  strategyPreview
+  strategyPreview,
+  strategyHasUnsavedChanges,
+  strategyPreviewStale,
+  strategySaveMessage
 }) {
+  const isPriorityOverride = activeStrategyMode.id === 'priority_override'
+  const droppedNodes = strategyPreview?.summary?.dropped_nodes ?? 0
+
   return (
     <div className="section-block strategy-panel">
       <div>
@@ -16,6 +22,35 @@ export default function StrategyPanel({
         <p className="strategy-note">
           对 `/clash` 与 `/singbox` 聚合输出生效。预览基于当前缓存上游和已启用手动节点，不会触发同步。
         </p>
+      </div>
+
+      <div className="status-stack">
+        {strategySaveMessage && <div className="status-box success">{strategySaveMessage}</div>}
+        {strategy && strategyHasUnsavedChanges && (
+          <div className="status-box warning">当前草稿有未保存变更。切换标签页、刷新页面或退出登录前请先确认是否保存。</div>
+        )}
+        {strategyPreview && (
+          <div className={`status-box ${strategyPreviewStale ? 'warning' : 'info'}`}>
+            {strategyPreviewStale
+              ? '当前预览已过期：你在最近一次预览后又修改了策略草稿，请重新执行“预览结果”。'
+              : '当前预览与当前草稿一致，可作为本次保存前的参考结果。'}
+          </div>
+        )}
+        {strategy && isPriorityOverride && (
+          <div className="status-box warning">
+            <strong>风险提示</strong>
+            <div>
+              <code>priority_override</code> 模式会在同名冲突时直接丢弃低优先级来源。
+              {strategyPreview
+                ? strategyPreviewStale
+                  ? ' 当前预览已过期，保存前建议重新预览确认实际丢弃结果。'
+                  : droppedNodes > 0
+                    ? ` 当前预览预计丢弃 ${droppedNodes} 个节点，请确认后再保存。`
+                    : ' 当前预览未发现需要丢弃的节点，但仍建议检查冲突处理结果。'
+                : ' 保存前建议先执行一次预览，确认冲突处理结果。'}
+            </div>
+          </div>
+        )}
       </div>
 
       {strategy ? (

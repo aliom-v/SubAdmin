@@ -391,6 +391,49 @@ button:disabled {
   font-size: 0.92rem;
 }
 
+.status-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.status-box {
+  border-radius: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.status-box strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.status-box code {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(17, 95, 90, 0.1);
+  color: var(--primary);
+}
+
+.status-box.info {
+  background: #edf6fb;
+  color: #1d526b;
+  border-color: #c7e0ed;
+}
+
+.status-box.success {
+  background: #e4f4eb;
+  color: #176246;
+  border-color: #bde1cf;
+}
+
+.status-box.warning {
+  background: #fff4df;
+  color: #7b5415;
+  border-color: #f0ddb2;
+}
+
 .error-box {
   background: #fee8e5;
   color: #7a2d1f;

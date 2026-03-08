@@ -82,6 +82,11 @@ function buildStrategyPayload(strategy) {
   }
 }
 
+function strategyFingerprint(strategy) {
+  if (!strategy) return ''
+  return JSON.stringify(buildStrategyPayload(strategy))
+}
+
 function App() {
   const [booting, setBooting] = useState(true)
   const [authed, setAuthed] = useState(false)
@@ -94,6 +99,9 @@ function App() {
   const [settings, setSettings] = useState(null)
   const [strategy, setStrategy] = useState(null)
   const [strategyPreview, setStrategyPreview] = useState(null)
+  const [strategySavedFingerprint, setStrategySavedFingerprint] = useState('')
+  const [strategyPreviewFingerprint, setStrategyPreviewFingerprint] = useState('')
+  const [strategySaveMessage, setStrategySaveMessage] = useState('')
   const [syncLogs, setSyncLogs] = useState([])
   const [systemLogs, setSystemLogs] = useState([])
   const [tokens, setTokens] = useState([])
@@ -140,6 +148,44 @@ function App() {
   const activeStrategyMode =
     STRATEGY_MODES.find((item) => item.id === strategy?.strategy_mode) || STRATEGY_MODES[0]
 
+  const strategyDraftFingerprint = useMemo(() => strategyFingerprint(strategy), [strategy])
+  const strategyHasUnsavedChanges = Boolean(strategy && strategyDraftFingerprint !== strategySavedFingerprint)
+  const strategyPreviewStale = Boolean(
+    strategyPreview && strategyPreviewFingerprint && strategyPreviewFingerprint !== strategyDraftFingerprint
+  )
+
+  useEffect(() => {
+    if (!authed || !strategyHasUnsavedChanges) return undefined
+
+    const handleBeforeUnload = (event) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [authed, strategyHasUnsavedChanges])
+
+  function clearStrategyPreviewState() {
+    setStrategyPreview(null)
+    setStrategyPreviewFingerprint('')
+  }
+
+  function clearStrategySaveMessage() {
+    setStrategySaveMessage('')
+  }
+
+  function applyFetchedStrategy(data, { clearPreview = true } = {}) {
+    const normalized = normalizeStrategy(data)
+    setStrategy(normalized)
+    setStrategySavedFingerprint(strategyFingerprint(normalized))
+    clearStrategySaveMessage()
+    if (clearPreview) {
+      clearStrategyPreviewState()
+    }
+    return normalized
+  }
+
   async function fetchMe() {
     const me = await apiRequest('/api/me')
     setAdmin(me)
@@ -148,15 +194,13 @@ function App() {
 
   async function fetchStrategy() {
     const data = await apiRequest('/api/strategy')
-    const normalized = normalizeStrategy(data)
-    setStrategy(normalized)
-    return normalized
+    return applyFetchedStrategy(data)
   }
 
   async function refreshUpstreamsAndStrategy() {
     const [upstreamData, strategyData] = await Promise.all([apiRequest('/api/upstreams'), apiRequest('/api/strategy')])
     setUpstreams(upstreamData)
-    setStrategy(normalizeStrategy(strategyData))
+    applyFetchedStrategy(strategyData)
   }
 
   async function fetchAll() {
@@ -169,7 +213,7 @@ function App() {
     setUpstreams(upstreamData)
     setNodes(nodeData)
     setSettings(settingsData)
-    setStrategy(normalizeStrategy(strategyData))
+    applyFetchedStrategy(strategyData)
   }
 
   async function fetchLogs(limit = logLimit) {
@@ -212,6 +256,11 @@ function App() {
   }
 
   async function handleLogout() {
+    if (activeTab === 'settings' && strategyHasUnsavedChanges) {
+      const confirmed = window.confirm('当前有未保存的策略更改，确定退出登录吗？')
+      if (!confirmed) return
+    }
+
     setBusy(true)
     try {
       await logout()
@@ -222,6 +271,9 @@ function App() {
       setSettings(null)
       setStrategy(null)
       setStrategyPreview(null)
+      setStrategySavedFingerprint('')
+      setStrategyPreviewFingerprint('')
+      setStrategySaveMessage('')
       setSyncLogs([])
       setSystemLogs([])
       setTokens([])
@@ -265,6 +317,15 @@ function App() {
       setRawUpstreamID(upstreams[0].id)
     }
   }, [upstreams, rawUpstreamID])
+
+  function handleTabChange(nextTab) {
+    if (nextTab === activeTab) return
+    if (activeTab === 'settings' && strategyHasUnsavedChanges) {
+      const confirmed = window.confirm('当前有未保存的策略更改，确定离开系统设置页吗？')
+      if (!confirmed) return
+    }
+    setActiveTab(nextTab)
+  }
 
   function updateLoginFormField(key, value) {
     setLoginForm((prev) => ({ ...prev, [key]: value }))
@@ -450,6 +511,7 @@ function App() {
         truncated: lines.length > 30
       })
       setUpstreams(await apiRequest('/api/upstreams'))
+      clearStrategyPreviewState()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -468,6 +530,7 @@ function App() {
       })
       setNodeForm(emptyNode)
       setNodes(await apiRequest('/api/nodes'))
+      clearStrategyPreviewState()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -484,6 +547,7 @@ function App() {
         body: JSON.stringify(item)
       })
       setNodes(await apiRequest('/api/nodes'))
+      clearStrategyPreviewState()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -497,6 +561,7 @@ function App() {
     try {
       await apiRequest(`/api/nodes/${id}`, { method: 'DELETE' })
       setNodes(await apiRequest('/api/nodes'))
+      clearStrategyPreviewState()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -539,8 +604,13 @@ function App() {
         method: 'PUT',
         body: JSON.stringify(buildStrategyPayload(strategy))
       })
-      setStrategy(normalizeStrategy(data))
-      setStrategyPreview(null)
+      const normalized = applyFetchedStrategy(data)
+      setStrategySaveMessage(
+        settings?.cache_mode
+          ? '策略已保存。当前为缓存模式，输出缓存已自动刷新。'
+          : '策略已保存。当前为非缓存模式，如需立即更新输出可手动执行全量同步。'
+      )
+      setStrategySavedFingerprint(strategyFingerprint(normalized))
     } catch (err) {
       setError(err.message)
     } finally {
@@ -558,6 +628,8 @@ function App() {
         body: JSON.stringify(buildStrategyPayload(strategy))
       })
       setStrategyPreview(data)
+      setStrategyPreviewFingerprint(strategyDraftFingerprint)
+      clearStrategySaveMessage()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -567,7 +639,7 @@ function App() {
 
   function updateStrategyField(key, value) {
     setStrategy((prev) => (prev ? { ...prev, [key]: value } : prev))
-    setStrategyPreview(null)
+    clearStrategySaveMessage()
   }
 
   function updateStrategyPriority(id, value, index) {
@@ -585,7 +657,7 @@ function App() {
         )
       }
     })
-    setStrategyPreview(null)
+    clearStrategySaveMessage()
   }
 
   async function changePassword(event) {
@@ -796,6 +868,9 @@ function App() {
             onStrategyFieldChange={updateStrategyField}
             onStrategyPriorityChange={updateStrategyPriority}
             strategyPreview={strategyPreview}
+            strategyHasUnsavedChanges={strategyHasUnsavedChanges}
+            strategyPreviewStale={strategyPreviewStale}
+            strategySaveMessage={strategySaveMessage}
             passwordForm={passwordForm}
             onPasswordFormChange={updatePasswordFormField}
             onChangePassword={changePassword}
@@ -866,7 +941,7 @@ function App() {
   return (
     <main className="layout">
       <AppHeader admin={admin} statusSummary={statusSummary} busy={busy} onSyncAll={syncAll} onLogout={handleLogout} />
-      <TabNav tabs={TABS} activeTab={activeTab} onChange={setActiveTab} />
+      <TabNav tabs={TABS} activeTab={activeTab} onChange={handleTabChange} />
       {error && <div className="error-box">{error}</div>}
       {renderActiveTab()}
     </main>

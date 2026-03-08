@@ -13,6 +13,9 @@ export default function SettingsTab({
   onStrategyFieldChange,
   onStrategyPriorityChange,
   strategyPreview,
+  strategyHasUnsavedChanges,
+  strategyPreviewStale,
+  strategySaveMessage,
   passwordForm,
   onPasswordFormChange,
   onChangePassword,
@@ -84,6 +87,9 @@ export default function SettingsTab({
         onStrategyFieldChange={onStrategyFieldChange}
         onStrategyPriorityChange={onStrategyPriorityChange}
         strategyPreview={strategyPreview}
+        strategyHasUnsavedChanges={strategyHasUnsavedChanges}
+        strategyPreviewStale={strategyPreviewStale}
+        strategySaveMessage={strategySaveMessage}
       />
 
       <h3>修改密码</h3>
