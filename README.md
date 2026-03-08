@@ -41,6 +41,17 @@ curl -fsS http://127.0.0.1:18080/metrics | head
 docker compose ps
 ```
 
+本地校验：
+
+前置条件：
+
+- 已安装 Go 1.22+
+- 已安装 Node.js 20+ 与 npm
+
+```bash
+./scripts/verify.sh
+```
+
 Phase 4 一键回归：
 
 ```bash
