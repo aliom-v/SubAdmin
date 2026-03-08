@@ -10,6 +10,8 @@ jobs:
   backend:
     name: Backend Test
     runs-on: ubuntu-latest
+    env:
+      EVIDENCE_DIR: /tmp/ci-evidence/backend
     defaults:
       run:
         working-directory: backend
@@ -22,15 +24,37 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Prepare Evidence
+        run: mkdir -p "${EVIDENCE_DIR}"
+
       - name: Go Test
-        run: go test ./...
+        run: |
+          set -euo pipefail
+          start_ts=$(date +%s)
+          go test ./... | tee "${EVIDENCE_DIR}/go-test.log"
+          end_ts=$(date +%s)
+          echo "go_test_seconds=$((end_ts - start_ts))" >> "${EVIDENCE_DIR}/durations.env"
 
       - name: Go Vet
-        run: go vet ./...
+        run: |
+          set -euo pipefail
+          start_ts=$(date +%s)
+          go vet ./... | tee "${EVIDENCE_DIR}/go-vet.log"
+          end_ts=$(date +%s)
+          echo "go_vet_seconds=$((end_ts - start_ts))" >> "${EVIDENCE_DIR}/durations.env"
+
+      - name: Upload Backend Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-backend
+          path: /tmp/ci-evidence/backend
 
   frontend:
     name: Frontend Build
     runs-on: ubuntu-latest
+    env:
+      EVIDENCE_DIR: /tmp/ci-evidence/frontend
     defaults:
       run:
         working-directory: web
@@ -45,11 +69,31 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - name: Prepare Evidence
+        run: mkdir -p "${EVIDENCE_DIR}"
+
       - name: Install Dependencies
-        run: npm ci
+        run: |
+          set -euo pipefail
+          start_ts=$(date +%s)
+          npm ci 2>&1 | tee "${EVIDENCE_DIR}/npm-ci.log"
+          end_ts=$(date +%s)
+          echo "npm_ci_seconds=$((end_ts - start_ts))" >> "${EVIDENCE_DIR}/durations.env"
 
       - name: Build
-        run: npm run build
+        run: |
+          set -euo pipefail
+          start_ts=$(date +%s)
+          npm run build 2>&1 | tee "${EVIDENCE_DIR}/npm-build.log"
+          end_ts=$(date +%s)
+          echo "npm_build_seconds=$((end_ts - start_ts))" >> "${EVIDENCE_DIR}/durations.env"
+
+      - name: Upload Frontend Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-frontend
+          path: /tmp/ci-evidence/frontend
 
   smoke:
     name: API Smoke
@@ -57,39 +101,58 @@ jobs:
     needs:
       - backend
       - frontend
+    env:
+      EVIDENCE_DIR: /tmp/ci-evidence/smoke
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare Evidence
+        run: mkdir -p "${EVIDENCE_DIR}"
 
       - name: Start Stack
         run: |
           set -euo pipefail
           cp .env.example .env
-          docker compose up -d --build api web sublink
+          attempt=1
+          max_attempts=2
+          until docker compose up -d --build api web sublink 2>&1 | tee "${EVIDENCE_DIR}/docker-compose-up-attempt-${attempt}.log"; do
+            if [ "${attempt}" -ge "${max_attempts}" ]; then
+              exit 1
+            fi
+            docker compose down -v --remove-orphans || true
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+          echo "docker_compose_up_attempts=${attempt}" > "${EVIDENCE_DIR}/smoke.meta"
 
       - name: Smoke Check
         run: |
           set -euo pipefail
+          start_ts=$(date +%s)
           for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:18080/healthz >/tmp/healthz.json; then
+            if curl -fsS http://127.0.0.1:18080/healthz >"${EVIDENCE_DIR}/healthz.json"; then
               break
             fi
             sleep 2
           done
-          grep -q '"status":"ok"' /tmp/healthz.json
+          grep -q '"status":"ok"' "${EVIDENCE_DIR}/healthz.json"
 
-          login_code=$(curl -sS -o /tmp/login.json -w '%{http_code}' \
+          login_code=$(curl -sS -o "${EVIDENCE_DIR}/login.json" -w '%{http_code}' \
             -X POST http://127.0.0.1:18080/api/login \
             -H 'Content-Type: application/json' \
             -d '{"username":"admin","password":"admin123"}')
           test "${login_code}" = "200"
-          grep -q '"token"' /tmp/login.json
+          grep -q '"token"' "${EVIDENCE_DIR}/login.json"
+          echo "login_code=${login_code}" >> "${EVIDENCE_DIR}/smoke.meta"
 
-          curl -fsS http://127.0.0.1:18080/metrics >/tmp/metrics.txt
-          grep -q '^subadmin_http_requests_total' /tmp/metrics.txt
+          curl -fsS http://127.0.0.1:18080/metrics >"${EVIDENCE_DIR}/metrics.txt"
+          grep -q '^subadmin_http_requests_total' "${EVIDENCE_DIR}/metrics.txt"
 
+          : > "${EVIDENCE_DIR}/output-statuses.txt"
           for endpoint in clash singbox; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080/${endpoint}")
+            echo "${endpoint}=${code}" >> "${EVIDENCE_DIR}/output-statuses.txt"
             case "${code}" in
               200|304|502) ;;
               *)
@@ -98,6 +161,15 @@ jobs:
                 ;;
             esac
           done
+          end_ts=$(date +%s)
+          echo "smoke_seconds=$((end_ts - start_ts))" >> "${EVIDENCE_DIR}/smoke.meta"
+
+      - name: Upload Smoke Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-smoke
+          path: /tmp/ci-evidence/smoke
 
       - name: Shutdown Stack
         if: always()

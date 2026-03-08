@@ -1,6 +1,6 @@
 # 项目实施与进度文档
 
-更新时间：2026-03-02（Phase 4 脚本验收通过）
+更新时间：2026-03-02（Phase 4 收尾资产补齐）
 
 ## 1. 文档定位
 
@@ -16,7 +16,8 @@
 - 已完成 O5/O6：SQLite 索引补齐与查询计划验证、`subconverter` 镜像 digest 固定。
 - 已完成 O7/O8：Prometheus 指标与结构化日志、CI 门禁工作流（后端+前端+冒烟）。
 - 已完成 Phase 4 基线回归：`./scripts/phase4_acceptance.sh` 全量通过（2026-03-02 14:18 +08:00）。
-- 当前主要待办为 Phase 4 压测抽检与复盘，以及 CI 首次远端执行留痕。
+- 已补齐 Phase 4 压测抽检脚本、压测复盘模板与 CI 首跑留痕模板。
+- 当前主要待办为执行真实压测抽检并回填复盘，以及执行 CI 首次远端运行并归档证据产物。
 
 ## 3. 功能状态矩阵
 
@@ -180,10 +181,11 @@ P1（增强）：
 
 下一步（收尾）：
 
-1. 执行 CI 首次全流程并固化留痕（构建耗时、失败重试策略、告警阈值）。
-2. 已完成：运行 `./scripts/phase4_acceptance.sh`（2026-03-02 14:18 +08:00），覆盖健康检查、鉴权、ETag/304、备份、登录限流锁定、同步重试与日志结构化断言。
-3. 归档回归执行日志，沉淀固定验收基线。
-4. 开展 Phase 4 压测抽检，形成首轮复盘报告。
+1. 已完成：新增 `./scripts/phase4_pressure_sample.sh` 与 `docs/PHASE4_PRESSURE_REVIEW.md`，补齐压测抽检入口与复盘模板。
+2. 已完成：新增 `docs/CI_FIRST_RUN_EVIDENCE.md`，并在 `.github/workflows/ci.yml` 中补齐三类证据产物上传（backend/frontend/smoke）。
+3. 已完成：运行 `./scripts/phase4_acceptance.sh`（2026-03-02 14:18 +08:00），覆盖健康检查、鉴权、ETag/304、备份、登录限流锁定、同步重试与日志结构化断言。
+4. 待执行：触发 CI 首次远端全流程并下载证据产物，回填构建耗时、重试行为与告警阈值。
+5. 待执行：开展 Phase 4 压测抽检并将结果写入 `docs/PHASE4_PRESSURE_REVIEW.md`。
 
 ## 10. 变更记录（摘要）
 
@@ -208,3 +210,4 @@ P1（增强）：
 - 新增 Phase 4 回归脚本：`scripts/phase4_acceptance.sh`，覆盖健康检查、鉴权、ETag/304、备份、登录限流锁定、同步重试与结构化日志字段验证。
 - 执行 Phase 4 回归脚本并通过：修正系统日志断言为兼容转义 JSON 字段匹配（`request_id`/`sync_upstream_retry`），脚本在本地 Docker 环境全量通过。
 - 更新配置示例与文档：新增认证 Cookie、登录防护、输出缓存协商、`SUBLINK_IMAGE` 与观测入口说明。
+- 补齐 Phase 4 收尾资产：新增 `scripts/phase4_pressure_sample.sh`、`docs/PHASE4_PRESSURE_REVIEW.md`、`docs/CI_FIRST_RUN_EVIDENCE.md`，并为 CI job 增加证据产物上传。

@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -35,27 +35,27 @@ import (
 type contextKey string
 
 const (
-	contextKeyAdmin contextKey = "admin"
-	defaultLogLimit            = 100
-	maxLogLimit                = 500
-	maxRawContentBytes         = 2 * 1024 * 1024
-	maxRawPreviewNodes         = 30
-	defaultAutoBackupHours     = 24
-	defaultAutoBackupKeep      = 7
-	defaultTokenTTLHours       = 24 * 30
-	sublinkSourceTTL           = 2 * time.Minute
-	maxSublinkSourceBytes      = 8 * 1024 * 1024
-	defaultAuthCookieName      = "subadmin_token"
-	defaultLoginRateWindow     = 1 * time.Minute
-	defaultLoginRateMaxIP      = 30
-	defaultLoginRateMaxUser    = 10
-	defaultLoginLockThreshold  = 5
-	defaultLoginLockDuration   = 5 * time.Minute
-	defaultOutputCacheControl  = "no-cache"
-	defaultSyncMaxConcurrency  = 3
-	defaultSyncRetryAttempts   = 3
-	defaultSyncRetryBaseDelay  = 500 * time.Millisecond
-	defaultSyncRetryMaxDelay   = 5 * time.Second
+	contextKeyAdmin           contextKey = "admin"
+	defaultLogLimit                      = 100
+	maxLogLimit                          = 500
+	maxRawContentBytes                   = 2 * 1024 * 1024
+	maxRawPreviewNodes                   = 30
+	defaultAutoBackupHours               = 24
+	defaultAutoBackupKeep                = 7
+	defaultTokenTTLHours                 = 24 * 30
+	sublinkSourceTTL                     = 2 * time.Minute
+	maxSublinkSourceBytes                = 8 * 1024 * 1024
+	defaultAuthCookieName                = "subadmin_token"
+	defaultLoginRateWindow               = 1 * time.Minute
+	defaultLoginRateMaxIP                = 30
+	defaultLoginRateMaxUser              = 10
+	defaultLoginLockThreshold            = 5
+	defaultLoginLockDuration             = 5 * time.Minute
+	defaultOutputCacheControl            = "no-cache"
+	defaultSyncMaxConcurrency            = 3
+	defaultSyncRetryAttempts             = 3
+	defaultSyncRetryBaseDelay            = 500 * time.Millisecond
+	defaultSyncRetryMaxDelay             = 5 * time.Second
 )
 
 type sublinkSourceEntry struct {
@@ -296,11 +296,11 @@ func New(cfg *config.Config, db *sql.DB, logger *log.Logger) (*Server, error) {
 		httpClient: &http.Client{
 			Timeout: cfg.HTTPTimeout,
 		},
-		sublinkSources: make(map[string]sublinkSourceEntry),
-		loginIPWindows: make(map[string]loginAttemptWindow),
+		sublinkSources:  make(map[string]sublinkSourceEntry),
+		loginIPWindows:  make(map[string]loginAttemptWindow),
 		loginUserWindow: make(map[string]loginAttemptWindow),
-		loginFailures:  make(map[string]int),
-		loginLocks:     make(map[string]time.Time),
+		loginFailures:   make(map[string]int),
+		loginLocks:      make(map[string]time.Time),
 	}
 	s.router = s.routes()
 	return s, nil
@@ -1599,25 +1599,16 @@ func (s *Server) handleOutput(target string) http.HandlerFunc {
 		}
 
 		if settings.CacheMode {
-			content, err := s.readCache(target)
+			content, lastModified, err := s.readCacheWithModTime(target)
 			if err == nil && strings.TrimSpace(content) != "" {
-				lastModified := time.Time{}
-				if info, statErr := os.Stat(s.cacheFile(target)); statErr == nil {
-					lastModified = info.ModTime()
-				}
 				s.writeOutput(w, r, target, content, lastModified)
 				return
 			}
 
-			result, err := s.refreshCache(r.Context())
+			content, lastModified, err = s.ensureOutputCache(r.Context(), target)
 			if err != nil {
 				writeError(w, http.StatusBadGateway, fmt.Sprintf("refresh cache failed: %v", err))
 				return
-			}
-			content = result[target]
-			lastModified := s.lastCacheRun
-			if lastModified.IsZero() {
-				lastModified = time.Now()
 			}
 			s.writeOutput(w, r, target, content, lastModified)
 			return
@@ -1736,7 +1727,10 @@ func (s *Server) cleanupExpiredSublinkSourcesLocked(now time.Time) {
 func (s *Server) refreshCache(ctx context.Context) (map[string]string, error) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
+	return s.refreshCacheLocked(ctx)
+}
 
+func (s *Server) refreshCacheLocked(ctx context.Context) (map[string]string, error) {
 	nodes, err := s.collectNodesFromStore(ctx)
 	if err != nil {
 		return nil, err
@@ -1765,6 +1759,28 @@ func (s *Server) refreshCache(ctx context.Context) (map[string]string, error) {
 
 	s.lastCacheRun = time.Now()
 	return result, nil
+}
+
+func (s *Server) ensureOutputCache(ctx context.Context, target string) (string, time.Time, error) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+
+	content, lastModified, err := s.readCacheWithModTime(target)
+	if err == nil && strings.TrimSpace(content) != "" {
+		return content, lastModified, nil
+	}
+
+	result, err := s.refreshCacheLocked(ctx)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	content = result[target]
+	lastModified = s.lastCacheRun
+	if lastModified.IsZero() {
+		lastModified = time.Now()
+	}
+	return content, lastModified, nil
 }
 
 func (s *Server) collectNodesFromStore(ctx context.Context) ([]string, error) {
@@ -2892,6 +2908,18 @@ func (s *Server) readCache(target string) (string, error) {
 		return "", err
 	}
 	return string(content), nil
+}
+
+func (s *Server) readCacheWithModTime(target string) (string, time.Time, error) {
+	content, err := os.ReadFile(s.cacheFile(target))
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	info, err := os.Stat(s.cacheFile(target))
+	if err != nil {
+		return string(content), time.Time{}, nil
+	}
+	return string(content), info.ModTime(), nil
 }
 
 func (s *Server) cacheFile(target string) string {

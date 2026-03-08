@@ -46,6 +46,12 @@ Phase 4 一键回归：
 ./scripts/phase4_acceptance.sh
 ```
 
+Phase 4 压测抽检：
+
+```bash
+./scripts/phase4_pressure_sample.sh
+```
+
 ## 部署模式
 
 - 共存模式（推荐）：`docker compose up -d --build api web sublink`
@@ -81,6 +87,8 @@ Phase 4 一键回归：
 
 - 执行计划（Plan）：`docs/OPTIMIZATION_PLAN.md`
 - 状态摘要（Status）：`docs/STATUS.md`
+- Phase 4 压测复盘：`docs/PHASE4_PRESSURE_REVIEW.md`
+- CI 首跑留痕：`docs/CI_FIRST_RUN_EVIDENCE.md`
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
 - 前后端源码：`backend/`、`web/`
