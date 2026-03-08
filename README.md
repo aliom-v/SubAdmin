@@ -44,20 +44,19 @@ curl -fsS http://127.0.0.1:18080/metrics | head
 docker compose ps
 ```
 
-完整校验（需要 Go 1.22+、Node.js 20+ 与 npm）：
+统一命令入口：
 
 ```bash
-./scripts/verify.sh
+make verify
+make acceptance
+make pressure
 ```
 
-回归与压测入口：
+说明：
 
-```bash
-./scripts/phase4_acceptance.sh
-./scripts/phase4_pressure_sample.sh
-```
-
-压测报告默认输出到 `data/reports/`。
+- `make verify`：完整校验（需要 Go 1.22+、Node.js 20+ 与 npm）
+- `make acceptance`：执行 Phase 4 回归脚本
+- `make pressure`：执行 Phase 4 压测抽检，报告默认输出到 `data/reports/`
 
 ## 部署模式
 
