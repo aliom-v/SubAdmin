@@ -99,7 +99,7 @@ Phase 4 压测抽检：
 
 ## 文档导航
 
-- 执行计划（Plan）：`docs/OPTIMIZATION_PLAN.md`
+- 实施归档（Archive）：`docs/OPTIMIZATION_PLAN.md`
 - 状态摘要（Status）：`docs/STATUS.md`
 - 排障手册：`docs/TROUBLESHOOTING.md`
 - 备份恢复：`docs/BACKUP_RESTORE.md`
